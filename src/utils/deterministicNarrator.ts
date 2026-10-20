@@ -36,7 +36,7 @@ export function generateDeterministicObservationLog(params: NarrationParams): {
   // Health state string
   let healthState = 'Stable';
   if (survivor.isBitten) {
-    healthState = 'Lethally Infected (Knox Virus 100% Terminal)';
+    healthState = 'Lethally Infected (Charval Virus 100% Terminal)';
   } else if (survivor.injuries.some((i) => i.bleeding)) {
     healthState = 'Active Hemorrhage / Bleeding';
   } else if (survivor.injuries.length > 0) {
@@ -72,7 +72,7 @@ export function generateDeterministicObservationLog(params: NarrationParams): {
   const inventoryStr = `${weaponStr} · Tool: ${toolStr}`;
 
   // Paragraphs for Observation Log
-  const p1 = `Surveillance feed captures Sector 4B in Knox County under a blanket of ${environment.weather.toLowerCase()}. The atmospheric barometer registers ${environment.temperatureC}°C with ${environment.gridPower ? 'substation transformers humming faintly' : 'complete blackout grid silence'}. ${
+  const p1 = `Surveillance feed captures Sector 4B in Charval County under a blanket of ${environment.weather.toLowerCase()}. The atmospheric barometer registers ${environment.temperatureC}°C with ${environment.gridPower ? 'substation transformers humming faintly' : 'complete blackout grid silence'}. ${
     tacticalAction ? `The subject executed tactical directive: "${tacticalAction}".` : ''
   } ${recentEvent || 'The survivor scans the perimeter through cracked vertical blinds, breath misting in the cold air.'}`;
 
@@ -91,7 +91,7 @@ export function generateDeterministicObservationLog(params: NarrationParams): {
   }
 
   const p3 = survivor.isBitten
-    ? `CRITICAL TELEMETRY WARNING: Viral genome progression has initiated in the bloodstream. The fever will mount inevitably. Cognitive and physical decline will culminate in total loss of subject vitals. There is no cure in Knox County.`
+    ? `CRITICAL TELEMETRY WARNING: Viral genome progression has initiated in the bloodstream. The fever will mount inevitably. Cognitive and physical decline will culminate in total loss of subject vitals. There is no cure in Charval County.`
     : `Acoustic microphones register steady wind and distant metallic creaking. Every tactical decision exacts an inescapable toll on calories, hydration, and weapon steel.`;
 
   // Generate dynamic 3-4 available actions based on context

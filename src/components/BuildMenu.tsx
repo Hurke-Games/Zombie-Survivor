@@ -8,6 +8,7 @@ interface BuildMenuProps {
   onClose: () => void;
   survivor: Survivor;
   onCraft: (recipe: CraftingRecipe) => void;
+  asSidePanel?: boolean;
 }
 
 export const BuildMenu: React.FC<BuildMenuProps> = ({
@@ -15,6 +16,7 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
   onClose,
   survivor,
   onCraft,
+  asSidePanel = false,
 }) => {
   const [activeCategory, setActiveCategory] = useState<string>('All');
 
@@ -28,10 +30,6 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
     { id: 'Furniture', label: 'Mat, Fire & Workbench', icon: <Moon className="w-3.5 h-3.5" /> },
   ];
 
-  const filteredRecipes = BUILD_RECIPES.filter(
-    (r) => activeCategory === 'All' || r.category === activeCategory
-  );
-
   const getItemCount = (itemId: string, name: string): number => {
     const item = survivor.inventory.find(
       (i) => i.id === itemId || i.name.toLowerCase().includes(name.toLowerCase())
@@ -39,9 +37,40 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
     return item?.count ?? (item ? 1 : 0);
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 select-none font-mono">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+  const filteredRecipes = BUILD_RECIPES.filter(
+    (r) => activeCategory === 'All' || r.category === activeCategory
+  ).sort((a, b) => {
+    const canAffordA = a.ingredients.every((ing) => getItemCount(ing.itemId, ing.name) >= ing.count);
+    const hasEnduranceA = survivor.endurance >= a.enduranceCost;
+    const canCraftA = canAffordA && hasEnduranceA;
+
+    const canAffordB = b.ingredients.every((ing) => getItemCount(ing.itemId, ing.name) >= ing.count);
+    const hasEnduranceB = survivor.endurance >= b.enduranceCost;
+    const canCraftB = canAffordB && hasEnduranceB;
+
+    if (canCraftA && !canCraftB) return -1;
+    if (!canCraftA && canCraftB) return 1;
+    if (canAffordA && !canAffordB) return -1;
+    if (!canAffordA && canAffordB) return 1;
+    return 0;
+  });
+
+  const planksCount = survivor.inventory
+    .filter((i) => i.id === 'inv_planks' || i.name.toLowerCase().includes('plank'))
+    .reduce((sum, i) => sum + (i.count ?? 1), 0);
+
+  const nailsCount = survivor.inventory
+    .filter((i) => i.id === 'inv_nails' || i.name.toLowerCase().includes('nail'))
+    .reduce((sum, i) => sum + (i.count ?? 1), 0);
+
+  const componentsCount = survivor.inventory
+    .filter((i) => i.id === 'inv_scrap_metal' || i.name.toLowerCase().includes('scrap') || i.name.toLowerCase().includes('component') || i.name.toLowerCase().includes('wire') || i.name.toLowerCase().includes('duct'))
+    .reduce((sum, i) => sum + (i.count ?? 1), 0);
+
+  const innerContent = (
+    <div className={`bg-neutral-900 border-neutral-800 flex flex-col font-mono select-none overflow-hidden ${
+      asSidePanel ? 'w-full h-full border-0' : 'border rounded-lg max-w-3xl w-full max-h-[85vh] shadow-2xl'
+    }`}>
         {/* Header */}
         <div className="px-4 py-3 bg-neutral-950 border-b border-neutral-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -61,6 +90,33 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+
+        {/* Resource Material Inventory Bar (Planks, Nails, Components at the top) */}
+        <div className="px-4 py-2 bg-neutral-950/95 border-b border-neutral-800 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider">
+            Crafting Materials:
+          </span>
+          <div className="flex items-center gap-2.5 sm:gap-4">
+            <span className="flex items-center gap-1.5 text-amber-300 font-bold" title="Wood Planks in Backpack">
+              <span>🪵 Planks:</span>
+              <span className={`px-2 py-0.5 rounded border text-[11px] font-bold ${planksCount > 0 ? 'bg-amber-950/80 border-amber-800 text-amber-200' : 'bg-neutral-900 border-neutral-800 text-neutral-500'}`}>
+                {planksCount}
+              </span>
+            </span>
+            <span className="flex items-center gap-1.5 text-sky-300 font-bold" title="Nails in Backpack">
+              <span>🔩 Nails:</span>
+              <span className={`px-2 py-0.5 rounded border text-[11px] font-bold ${nailsCount > 0 ? 'bg-sky-950/80 border-sky-800 text-sky-200' : 'bg-neutral-900 border-neutral-800 text-neutral-500'}`}>
+                {nailsCount}
+              </span>
+            </span>
+            <span className="flex items-center gap-1.5 text-emerald-300 font-bold" title="Scrap Metal & Components in Backpack">
+              <span>⚙️ Components:</span>
+              <span className={`px-2 py-0.5 rounded border text-[11px] font-bold ${componentsCount > 0 ? 'bg-emerald-950/80 border-emerald-800 text-emerald-200' : 'bg-neutral-900 border-neutral-800 text-neutral-500'}`}>
+                {componentsCount}
+              </span>
+            </span>
+          </div>
         </div>
 
         {/* Category Tabs */}
@@ -155,6 +211,9 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
                     onClick={() => {
                       if (canCraft) {
                         onCraft(recipe);
+                        if (recipe.resultItem?.isPlaceable) {
+                          onClose();
+                        }
                       }
                     }}
                     disabled={!canCraft}
@@ -162,11 +221,21 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
                       canCraft
                         ? isWorkbenchBlueprint
                           ? 'bg-amber-600 hover:bg-amber-500 text-neutral-950 font-bold border-amber-500 shadow'
+                          : recipe.resultItem?.isPlaceable
+                          ? 'bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold border-amber-400 shadow'
                           : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-600 shadow'
                         : 'bg-neutral-800 text-neutral-500 border-neutral-700 cursor-not-allowed'
                     }`}
                   >
-                    {canCraft ? (isWorkbenchBlueprint ? 'Construct Workbench' : 'Build / Craft') : !canAfford ? 'Missing Materials' : 'Low Stamina'}
+                    {canCraft
+                      ? isWorkbenchBlueprint
+                        ? 'Construct Workbench'
+                        : recipe.resultItem?.isPlaceable
+                        ? 'Place on Map'
+                        : 'Build / Craft'
+                      : !canAfford
+                      ? 'Missing Materials'
+                      : 'Low Stamina'}
                   </button>
                 </div>
               </div>
@@ -174,6 +243,15 @@ export const BuildMenu: React.FC<BuildMenuProps> = ({
           })}
         </div>
       </div>
+  );
+
+  if (asSidePanel) {
+    return innerContent;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 select-none font-mono">
+      {innerContent}
     </div>
   );
 };

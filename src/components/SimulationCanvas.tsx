@@ -22,6 +22,7 @@ import {
   RotateCcw,
   Sun,
   Moon,
+  Home,
 } from 'lucide-react';
 
 interface SimulationCanvasProps {
@@ -40,12 +41,15 @@ interface SimulationCanvasProps {
   buildings?: import('../types/game').BuildingBounds[];
   onPrimaryAction: (x: number, y: number) => void;
   onCancelPlacement: () => void;
+  onRotatePlacement?: () => void;
   onCycleActiveSlot: (delta: number) => void;
   isThermalMode: boolean;
   onToggleThermal: () => void;
   isHeatmapMode: boolean;
   onToggleHeatmap: () => void;
   onToggleFlashlight: () => void;
+  currentShelter?: { name: string; isInside: boolean; sectorX: number; sectorY: number } | null;
+  onSetAsBase?: () => void;
 }
 
 export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
@@ -63,12 +67,15 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
   buildings = [],
   onPrimaryAction,
   onCancelPlacement,
+  onRotatePlacement,
   onCycleActiveSlot,
   isThermalMode,
   onToggleThermal,
   isHeatmapMode,
   onToggleHeatmap,
   onToggleFlashlight,
+  currentShelter,
+  onSetAsBase,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number }>({ x: 480, y: 360 });
@@ -161,7 +168,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     }
   };
 
-  // Scroll wheel: Ctrl+Wheel zooms in/out, normal Wheel cycles Hand slots (W1, W2, Tool)
+  // Scroll wheel: Ctrl+Wheel zooms in/out, placementGhost active rotates 90 degrees, normal Wheel cycles Hand slots (W1, W2, Tool)
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
@@ -170,6 +177,9 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
       } else {
         handleZoomOut();
       }
+    } else if (placementGhost) {
+      e.preventDefault();
+      onRotatePlacement?.();
     } else {
       onCycleActiveSlot(e.deltaY > 0 ? 1 : -1);
     }
@@ -399,6 +409,25 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
               ctx.fillRect(px, s.y + 2, 2, s.height - 4);
             }
           }
+
+          // Hammer dismantling demolition progress indicator (takes 5 clicks to tear down)
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            // Demolition crack marks
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(s.x + 3, s.y + 2);
+            ctx.lineTo(s.x + s.width * 0.45, s.y + s.height * 0.65);
+            ctx.lineTo(s.x + s.width - 3, s.y + s.height - 2);
+            ctx.stroke();
+            // Pips for clicks landed
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#ef4444';
+              ctx.fillRect(s.x + 3 + i * 5, s.y - 4, 3, 3);
+            }
+          }
         } else if (s.type === 'barricade_window') {
           ctx.fillStyle = isThermalMode ? '#1c2c36' : '#2a3b4c';
           ctx.fillRect(s.x, s.y, s.width, s.height);
@@ -410,31 +439,59 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
           ctx.fillRect(s.x + 1, s.y + 6, 2, 2);
           ctx.fillRect(s.x + s.width - 3, s.y + 22, 2, 2);
         } else if (s.type === 'door_wood') {
+          const isHorizontal = s.width >= s.height;
           if (s.isOpen) {
-            ctx.strokeStyle = '#334155';
+            // Open door threshold frame
+            ctx.strokeStyle = '#475569';
             ctx.lineWidth = 1;
             ctx.strokeRect(s.x, s.y, s.width, s.height);
 
-            // Door swung open
-            ctx.fillStyle = isThermalMode ? '#283b48' : '#55422f';
-            ctx.fillRect(s.x - 4, s.y - 45, 12, 45);
-            ctx.strokeStyle = isThermalMode ? '#3c586c' : '#2d2317';
-            ctx.strokeRect(s.x - 4, s.y - 45, 12, 45);
+            if (isHorizontal) {
+              // Horizontal door: swung open upwards from left hinge
+              const panelLen = Math.max(20, s.width - 4);
+              const panelThick = Math.min(s.height, 12);
+              ctx.fillStyle = isThermalMode ? '#283b48' : '#55422f';
+              ctx.fillRect(s.x, s.y - panelLen, panelThick, panelLen);
+              ctx.strokeStyle = isThermalMode ? '#3c586c' : '#2d2317';
+              ctx.strokeRect(s.x, s.y - panelLen, panelThick, panelLen);
 
-            ctx.fillStyle = '#f59e0b';
-            ctx.fillRect(s.x + 4, s.y - 25, 4, 3);
+              // Brass door knob / handle
+              ctx.fillStyle = '#f59e0b';
+              ctx.fillRect(s.x + panelThick - 3, s.y - panelLen * 0.5, 3, 4);
+            } else {
+              // Vertical door (sideways): swung open to the right from top hinge
+              const panelLen = Math.max(20, s.height - 4);
+              const panelThick = Math.min(s.width, 12);
+              ctx.fillStyle = isThermalMode ? '#283b48' : '#55422f';
+              ctx.fillRect(s.x + s.width, s.y, panelLen, panelThick);
+              ctx.strokeStyle = isThermalMode ? '#3c586c' : '#2d2317';
+              ctx.strokeRect(s.x + s.width, s.y, panelLen, panelThick);
+
+              // Brass door knob / handle
+              ctx.fillStyle = '#f59e0b';
+              ctx.fillRect(s.x + s.width + panelLen * 0.5, s.y + panelThick - 3, 4, 3);
+            }
           } else {
+            // Closed door
             ctx.fillStyle = isThermalMode ? '#3f596d' : '#685038';
             ctx.fillRect(s.x, s.y, s.width, s.height);
             ctx.strokeStyle = isThermalMode ? '#1e293b' : '#2c1e13';
             ctx.lineWidth = 1.5;
             ctx.strokeRect(s.x, s.y, s.width, s.height);
 
-            // Slide bolt
-            ctx.fillStyle = '#cbd5e1';
-            ctx.fillRect(s.x + s.width / 2 - 10, s.y + s.height / 2 - 2, 20, 5);
-            ctx.fillStyle = '#94a3b8';
-            ctx.fillRect(s.x + s.width / 2 - 2, s.y + s.height / 2 - 4, 4, 9);
+            if (isHorizontal) {
+              // Horizontal slide bolt
+              ctx.fillStyle = '#cbd5e1';
+              ctx.fillRect(s.x + s.width / 2 - 10, s.y + s.height / 2 - 2, 20, 4);
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x + s.width / 2 - 2, s.y + s.height / 2 - 4, 4, 8);
+            } else {
+              // Vertical slide bolt (for sideways placed door)
+              ctx.fillStyle = '#cbd5e1';
+              ctx.fillRect(s.x + s.width / 2 - 2, s.y + s.height / 2 - 10, 4, 20);
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x + s.width / 2 - 4, s.y + s.height / 2 - 2, 8, 4);
+            }
           }
         } else if (s.type === 'sleeping_mat') {
           ctx.fillStyle = isThermalMode ? '#1e293b' : '#475569';
@@ -1226,7 +1283,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
 
         ctx.fillStyle = '#10b981';
         ctx.font = 'bold 11px monospace';
-        ctx.fillText(`Place: ${placementGhost.item.name} [Left Click]`, gx, gy - 6);
+        ctx.fillText(`Place: ${placementGhost.item.name} [Scroll: Rotate 90° · Left-Click: Place · Right-Click: Finish]`, gx, gy - 6);
       }
 
       // 11. Floating Contextual Interaction Prompt
@@ -1331,6 +1388,19 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
 
       {/* Canvas Top Bar Controls & Mode Toggles */}
       <div className="absolute top-3 right-3 flex items-center gap-1.5 z-20">
+        {/* Set Current House/Structure As Home Base Button */}
+        {currentShelter && onSetAsBase && (
+          <button
+            onClick={onSetAsBase}
+            title={`Set "${currentShelter.name}" as your colony's Home Base. Minimap will point here and survivors will focus maintenance in Sector [${currentShelter.sectorX}, ${currentShelter.sectorY}].`}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono font-bold rounded border bg-emerald-950/95 border-emerald-500 text-emerald-200 hover:bg-emerald-900 transition-colors shadow-md"
+          >
+            <Home className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">SET AS BASE</span>
+            <span className="sm:hidden">BASE</span>
+          </button>
+        )}
+
         {/* Day / Night Cycle Phase Indicator */}
         {(() => {
           const dn = getDayNightInfo(environment.cycleSeconds ?? 360);
@@ -1438,7 +1508,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         <div className="absolute top-14 left-1/2 -translate-x-1/2 bg-emerald-950/95 border border-emerald-600 px-4 py-2 rounded text-emerald-200 text-xs font-mono shadow-xl flex items-center gap-3 backdrop-blur-md z-30">
           <span>Placing: <strong>{placementGhost.item.name}</strong></span>
           <span className="text-neutral-400">|</span>
-          <span className="text-neutral-300">Left-Click = Place · Right-Click = Cancel</span>
+          <span className="text-neutral-300">Scroll Wheel = Rotate 90° · Left-Click = Place · Right-Click = Finish</span>
         </div>
       )}
     </div>

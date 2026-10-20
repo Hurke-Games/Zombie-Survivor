@@ -1,5 +1,5 @@
 import React from 'react';
-import { NpcSurvivor, NpcTask, WorldStructure, Survivor } from '../types/game';
+import { NpcSurvivor, NpcTask, WorldStructure, Survivor, HomeBase } from '../types/game';
 import {
   Users,
   Footprints,
@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   X,
   Package,
+  Home,
 } from 'lucide-react';
 
 interface ColonyOverviewModalProps {
@@ -23,6 +24,10 @@ interface ColonyOverviewModalProps {
   onSetTask: (npcId: string, task: NpcTask) => void;
   onOpenTrade: (npc: NpcSurvivor) => void;
   onRepairStructure: (structureId: string) => void;
+  homeBase?: HomeBase;
+  onSetAsBase?: () => void;
+  currentShelter?: { name: string; isInside: boolean; sectorX: number; sectorY: number } | null;
+  asSidePanel?: boolean;
 }
 
 export const ColonyOverviewModal: React.FC<ColonyOverviewModalProps> = ({
@@ -34,6 +39,10 @@ export const ColonyOverviewModal: React.FC<ColonyOverviewModalProps> = ({
   onSetTask,
   onOpenTrade,
   onRepairStructure,
+  homeBase,
+  onSetAsBase,
+  currentShelter,
+  asSidePanel = false,
 }) => {
   if (!isOpen) return null;
 
@@ -50,9 +59,19 @@ export const ColonyOverviewModal: React.FC<ColonyOverviewModalProps> = ({
     survivor.inventory.find((i) => i.id === 'inv_nails' || i.name.toLowerCase().includes('nail'))
       ?.count ?? 0;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-xs p-4 select-none font-mono">
-      <div className="relative w-full max-w-4xl bg-neutral-950 border border-neutral-800 rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+  // Beds in current home base sector
+  const baseBedsCount = structures.filter(
+    (s) =>
+      (s.type === 'bed' || s.type === 'sleeping_mat') &&
+      homeBase &&
+      Math.floor(s.x / 800) === homeBase.sectorX &&
+      Math.floor(s.y / 800) === homeBase.sectorY
+  ).length;
+
+  const innerContent = (
+    <div className={`bg-neutral-950 border-neutral-800 flex flex-col font-mono select-none overflow-hidden ${
+      asSidePanel ? 'w-full h-full border-0' : 'relative w-full max-w-4xl border rounded-lg shadow-2xl max-h-[88vh]'
+    }`}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 bg-neutral-900 border-b border-neutral-800">
           <div className="flex items-center gap-2.5">
@@ -76,6 +95,51 @@ export const ColonyOverviewModal: React.FC<ColonyOverviewModalProps> = ({
 
         {/* Content Body */}
         <div className="p-5 overflow-y-auto space-y-5 text-xs text-neutral-300">
+          {/* Home Base & Repair Jurisdiction Banner */}
+          {homeBase && (
+            <div className="p-3 bg-neutral-900/90 border border-emerald-800/80 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded bg-emerald-950 border border-emerald-600 text-emerald-400 shrink-0">
+                  <Home className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-neutral-100 uppercase tracking-wide">
+                      Home Base: {homeBase.name}
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded bg-emerald-950 border border-emerald-700 text-emerald-300 text-[10px] font-bold">
+                      Sector [{homeBase.sectorX}, {homeBase.sectorY}]
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <p className="text-[10px] text-neutral-400">
+                      Patrol, sleeping, and maintenance are strictly restricted to Sector [{homeBase.sectorX}, {homeBase.sectorY}].
+                    </p>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      baseBedsCount > 0
+                        ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
+                        : 'bg-amber-950/90 border-amber-600 text-amber-300'
+                    }`}>
+                      {baseBedsCount > 0
+                        ? `🛏️ ${baseBedsCount} Base Bed${baseBedsCount > 1 ? 's' : ''} (Sleep Active)`
+                        : '⚠️ No Bed in Base (Survivors cannot sleep)'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {currentShelter && onSetAsBase && (
+                <button
+                  onClick={onSetAsBase}
+                  className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded border border-emerald-500 shadow transition-colors flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span>Set Current House as Base</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Section 1: Recruited Survivors */}
           <div className="space-y-3">
             <div className="flex items-center justify-between border-b border-neutral-800 pb-1">
@@ -285,6 +349,15 @@ export const ColonyOverviewModal: React.FC<ColonyOverviewModalProps> = ({
           </button>
         </div>
       </div>
+  );
+
+  if (asSidePanel) {
+    return innerContent;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-xs p-4 select-none font-mono">
+      {innerContent}
     </div>
   );
 };

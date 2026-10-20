@@ -210,7 +210,7 @@ const PROFESSIONS: {
       damage: 85,
       reach: 160,
     },
-    dialogue: 'Hold your fire! Knox County Sheriff Office. Patrol squad went dark three days ago. Keep me supplied with shells and I will keep the perimeter clear of shamblers!',
+    dialogue: 'Hold your fire! Charval County Sheriff Office. Patrol squad went dark three days ago. Keep me supplied with shells and I will keep the perimeter clear of shamblers!',
     startingSupplies: [
       { id: 'npc_dep_shells', name: '12g Buckshot Shells', category: 'resource', count: 10, weight: 0.8, description: 'Shotgun shells.' },
       { id: 'npc_dep_jerky', name: 'Dried Beef Jerky', category: 'food', count: 2, weight: 0.3, nutrition: 25, description: 'Dried smoked beef.' },
@@ -346,7 +346,7 @@ export function generateChunk(
         width: 48,
         height: 48,
         type: 'tree',
-        name: rng() < 0.5 ? 'White Pine Tree' : 'Knox Red Oak',
+        name: rng() < 0.5 ? 'White Pine Tree' : 'Charval Red Oak',
         hp: 120,
         maxHp: 120,
         chunkKey: key,
@@ -488,7 +488,7 @@ export function generateChunk(
       });
     }
   } else if (chunkType === 'hardware_store') {
-    name = `Knox Hardware & Tools [${chunkX}, ${chunkY}]`;
+    name = `Charval Hardware & Tools [${chunkX}, ${chunkY}]`;
     const sx = baseX + 220;
     const sy = baseY + 200;
     const sw = 340;
@@ -649,7 +649,7 @@ export function generateChunk(
       });
     }
   } else if (chunkType === 'police_gunshop') {
-    name = `Knox County Armory & Surplus [${chunkX}, ${chunkY}]`;
+    name = `Charval County Armory & Surplus [${chunkX}, ${chunkY}]`;
     const px = baseX + 230;
     const py = baseY + 210;
     const pw = 320;
@@ -762,7 +762,7 @@ export function generateChunk(
     }
   } else {
     // Pharmacy clinic fallback
-    name = `Knox Emergency Clinic [${chunkX}, ${chunkY}]`;
+    name = `Charval Emergency Clinic [${chunkX}, ${chunkY}]`;
     const cx = baseX + 230;
     const cy = baseY + 210;
     const cw = 320;

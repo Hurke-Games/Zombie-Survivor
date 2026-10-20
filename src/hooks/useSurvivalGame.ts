@@ -21,9 +21,11 @@ import {
   BuildingBounds,
   getDayNightInfo,
   SleepBlackoutState,
+  HomeBase,
 } from '../types/game';
 import { generateDeterministicObservationLog } from '../utils/deterministicNarrator';
 import { soundManager } from '../utils/audio';
+import { BUILD_RECIPES, WORKBENCH_RECIPES } from '../utils/craftingRecipes';
 import {
   CHUNK_SIZE,
   getChunkKey,
@@ -36,6 +38,13 @@ import {
 
 const GRID_COLS = 48; // 960 / 20
 const GRID_ROWS = 30; // 600 / 20
+
+// Distance from point to axis-aligned bounding box
+export const getDistToBox = (px: number, py: number, bx: number, by: number, bw: number, bh: number) => {
+  const nearestX = Math.max(bx, Math.min(px, bx + bw));
+  const nearestY = Math.max(by, Math.min(py, by + bh));
+  return Math.hypot(px - nearestX, py - nearestY);
+};
 
 const INITIAL_SURVIVOR: Survivor = {
   name: 'Subject #704 (James Miller)',
@@ -85,10 +94,10 @@ const INITIAL_SURVIVOR: Survivor = {
   },
   equippedTool: {
     id: 'hammer_init',
-    name: 'Claw Hammer',
+    name: 'Hammer',
     category: 'tool',
     weaponType: 'melee',
-    description: 'Essential for driving nails and fortifying timber structures.',
+    description: 'Essential for driving nails, constructing, and tearing down walls for wood & nails.',
     weight: 1.2,
     durability: 94,
     maxDurability: 100,
@@ -479,10 +488,11 @@ export function useSurvivalGame() {
   const zombieMultiplierRef = useRef<{ speedMult: number; healthMult: number }>({ speedMult: 1.0, healthMult: 1.0 });
 
   // High score tracking: Longest Survived Days (the primary goal & score!)
-  const HIGH_SCORE_STORAGE_KEY = 'knox_longest_survived_days';
+  const HIGH_SCORE_STORAGE_KEY = 'charval_longest_survived_days';
+  const LEGACY_HIGH_SCORE_STORAGE_KEY = 'knox_longest_survived_days';
   const [highScoreDays, setHighScoreDays] = useState<number>(() => {
     try {
-      const saved = localStorage.getItem(HIGH_SCORE_STORAGE_KEY);
+      const saved = localStorage.getItem(HIGH_SCORE_STORAGE_KEY) || localStorage.getItem(LEGACY_HIGH_SCORE_STORAGE_KEY);
       return saved ? parseFloat(saved) : 5;
     } catch {
       return 5;
@@ -525,6 +535,121 @@ export function useSurvivalGame() {
     };
     setAnimationEffects((prev) => [...prev.slice(-35), newEff]);
   }, []);
+
+  // Home Base Sector & Location (Can be set while inside any house/structure)
+  const HOME_BASE_STORAGE_KEY = 'charval_home_base';
+  const [homeBase, setHomeBase] = useState<HomeBase>(() => {
+    try {
+      const saved = localStorage.getItem(HOME_BASE_STORAGE_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      x: 480,
+      y: 360,
+      sectorX: 0,
+      sectorY: 0,
+      name: 'Safehouse Residence [Sector 0, 0]',
+    };
+  });
+  const homeBaseRef = useRef(homeBase);
+  homeBaseRef.current = homeBase;
+
+  // Detection if survivor is currently inside a house / shelter structure
+  const currentShelter = useMemo(() => {
+    // 1. Inside a generated building
+    const bldg = buildings.find(
+      (b) =>
+        survivor.x >= b.x - 5 &&
+        survivor.x <= b.x + b.width + 5 &&
+        survivor.y >= b.y - 5 &&
+        survivor.y <= b.y + b.height + 5
+    );
+    if (bldg) {
+      return {
+        name: bldg.name,
+        isInside: true,
+        x: Math.round(bldg.x + bldg.width / 2),
+        y: Math.round(bldg.y + bldg.height / 2),
+        sectorX: Math.floor((bldg.x + bldg.width / 2) / 800),
+        sectorY: Math.floor((bldg.y + bldg.height / 2) / 800),
+      };
+    }
+
+    // 2. Near player-built fortification or compound
+    const nearby = structures.find(
+      (s) =>
+        (s.type.includes('wall') || s.type === 'door_wood' || s.type === 'bed' || s.type === 'workbench') &&
+        Math.hypot(s.x + s.width / 2 - survivor.x, s.y + s.height / 2 - survivor.y) < 75
+    );
+    if (nearby) {
+      const secX = Math.floor(survivor.x / 800);
+      const secY = Math.floor(survivor.y / 800);
+      return {
+        name: `Fortified Compound [${secX}, ${secY}]`,
+        isInside: true,
+        x: Math.round(survivor.x),
+        y: Math.round(survivor.y),
+        sectorX: secX,
+        sectorY: secY,
+      };
+    }
+
+    return null;
+  }, [buildings, structures, survivor.x, survivor.y]);
+
+  // Set current house/structure as Colony Home Base
+  const setAsHomeBase = useCallback((targetOverride?: { x: number; y: number; name?: string }) => {
+    const curr = survivorRef.current;
+    const targetX = targetOverride ? targetOverride.x : Math.round(curr.x);
+    const targetY = targetOverride ? targetOverride.y : Math.round(curr.y);
+    const secX = Math.floor(targetX / 800);
+    const secY = Math.floor(targetY / 800);
+
+    const bldg = buildingsRef.current.find(
+      (b) => targetX >= b.x - 5 && targetX <= b.x + b.width + 5 && targetY >= b.y - 5 && targetY <= b.y + b.height + 5
+    );
+    const baseName = targetOverride?.name || bldg?.name || `Safehouse Base [Sector ${secX}, ${secY}]`;
+
+    const newBase: HomeBase = {
+      x: targetX,
+      y: targetY,
+      sectorX: secX,
+      sectorY: secY,
+      name: baseName,
+    };
+
+    setHomeBase(newBase);
+    homeBaseRef.current = newBase;
+    try {
+      localStorage.setItem(HOME_BASE_STORAGE_KEY, JSON.stringify(newBase));
+    } catch {}
+
+    // Rally all recruited colony survivors that aren't following the player to the new base
+    setNpcs((prev) =>
+      prev.map((n, idx) => {
+        if (n.state === 'recruited' && n.assignedTask !== 'follow') {
+          return {
+            ...n,
+            targetX: targetX + ((idx % 2 === 0 ? 1 : -1) * 35),
+            targetY: targetY + ((idx > 1 ? 1 : -1) * 35),
+          };
+        }
+        return n;
+      })
+    );
+
+    soundManager.playTerminalBlip();
+    triggerAnimation({
+      type: 'floating_text',
+      x: targetX,
+      y: targetY - 20,
+      angle: 0,
+      text: `BASE ESTABLISHED: ${baseName}`,
+      color: '#38bdf8',
+      durationMs: 2500,
+    });
+    setSystemMessage(`Established Home Base at "${baseName}" in Sector [${secX}, ${secY}]! Minimap, repairs, and survivor tasks now bound to this sector.`);
+  }, [triggerAnimation]);
 
   // Procedural chunk generation and world tracking around player
   const updateProceduralChunks = useCallback((playerX: number, playerY: number) => {
@@ -653,14 +778,14 @@ export function useSurvivalGame() {
       return {
         structureId: survivor.sleepingStructureId || 'bed',
         name: 'Asleep in Bed',
-        actionLabel: 'Wake Up [F]',
+        actionLabel: 'Wake Up [E/F]',
         x: survivor.x,
         y: survivor.y,
         type: 'bed',
       };
     }
 
-    // 1. Check for DOORS with top priority (within 80px) -> Open/Close with [F]!
+    // 1. Check for DOORS with top priority (within 100px) -> Open/Close with [E/F] or Click!
     const nearestDoor = structures.reduce<{ struct: WorldStructure | null; dist: number }>(
       (acc, s) => {
         if (s.type !== 'door_wood') return acc;
@@ -670,7 +795,7 @@ export function useSurvivalGame() {
         if (d < acc.dist) return { struct: s, dist: d };
         return acc;
       },
-      { struct: null, dist: 80 }
+      { struct: null, dist: 100 }
     );
 
     if (nearestDoor.struct) {
@@ -680,15 +805,15 @@ export function useSurvivalGame() {
         structureId: s.id,
         name: s.name,
         actionLabel: s.isOpen
-          ? `Close Door [F]${isDamaged ? ' · [R] Repair' : ''}`
-          : `Open Door [F]${isDamaged ? ' · [R] Repair' : ''}`,
+          ? `Close Door [E/F]${isDamaged ? ' · [R] Repair' : ''}`
+          : `Open Door [E/F]${isDamaged ? ' · [R] Repair' : ''}`,
         x: s.x + s.width / 2,
         y: s.y + s.height / 2,
         type: s.type,
       };
     }
 
-    // 2. Check for nearby FENCES to vault / jump with [F] (within 48px)
+    // 2. Check for nearby FENCES to vault / jump with [E/F] (within 55px)
     const nearestFence = structures.reduce<{ struct: WorldStructure | null; dist: number }>(
       (acc, s) => {
         if (s.type !== 'fence_wood' && s.type !== 'fence_wire') return acc;
@@ -698,7 +823,7 @@ export function useSurvivalGame() {
         if (d < acc.dist) return { struct: s, dist: d };
         return acc;
       },
-      { struct: null, dist: 48 }
+      { struct: null, dist: 55 }
     );
 
     if (nearestFence.struct) {
@@ -706,7 +831,7 @@ export function useSurvivalGame() {
       return {
         structureId: s.id,
         name: s.name,
-        actionLabel: `Jump / Vault Fence [F]`,
+        actionLabel: `Jump / Vault Fence [E/F]`,
         x: s.x + s.width / 2,
         y: s.y + s.height / 2,
         type: s.type,
@@ -815,24 +940,24 @@ export function useSurvivalGame() {
     if (s.type === 'door_wood') {
       actionLabel = s.isOpen ? 'Close Door [F]' : 'Open Door [F]';
     } else if (s.type === 'workbench') {
-      actionLabel = 'Craft at Workbench [F]';
+      actionLabel = 'Craft at Workbench [F] · [Click]';
     } else if (s.type === 'bed') {
       actionLabel = 'Sleep on Cot Bed [F]';
     } else if (s.type === 'sleeping_mat') {
       actionLabel = 'Sleep on Mat [F]';
     } else if (s.type === 'kitchen_stove') {
-      actionLabel = 'Kitchen Stove [F]';
+      actionLabel = 'Kitchen Stove [F] · [Click]';
     } else if (s.type === 'table_chair') {
       actionLabel = 'Sit at Table & Read [F]';
     } else if (s.type === 'tree') {
       actionLabel = `Chop Tree (${s.hp}/${s.maxHp} HP) [F]`;
     } else if (s.type === 'loot_container') {
       const isChest = s.name.toLowerCase().includes('chest');
-      actionLabel = isChest ? `Open ${s.name} [F]` : (s.containedLoot && s.containedLoot.length > 0 ? `Search ${s.name} [F]` : `Store in ${s.name} [F]`);
+      actionLabel = isChest ? `Open ${s.name} [F] · [Click]` : (s.containedLoot && s.containedLoot.length > 0 ? `Search ${s.name} [F] · [Click]` : `Store in ${s.name} [F] · [Click]`);
     } else if (s.type === 'rain_collector') {
       actionLabel = `Rain Barrel (${s.waterStored || 0}/50 Refills) [F]`;
     } else if (s.type === 'campfire') {
-      actionLabel = 'Warm Hands at Campfire [F]';
+      actionLabel = 'Campfire [F] · [Click]';
     }
 
     return {
@@ -958,25 +1083,48 @@ export function useSurvivalGame() {
   }, []);
 
   // Start Structure Placement Mode
-  const startPlacingItem = useCallback((item: Item) => {
+  const startPlacingItem = useCallback((item: Item, recipeId?: string) => {
     if (!item.isPlaceable || !item.placeStructureType) {
       setSystemMessage('This item cannot be placed on the ground.');
       return;
     }
     soundManager.playTerminalBlip();
+    const w = item.placeWidth || 50;
+    const h = item.placeHeight || 20;
     setPlacementGhost({
       item,
       structureType: item.placeStructureType,
-      width: item.placeWidth || 50,
-      height: item.placeHeight || 20,
+      width: w,
+      height: h,
+      originalWidth: w,
+      originalHeight: h,
+      rotation: 0,
+      recipeId,
     });
-    setSystemMessage(`Placement Mode: Left-click map to place ${item.name}. (Right-click or ESC to cancel)`);
+    setSystemMessage(`Placement Mode: Left-click map to place ${item.name}. (Scroll wheel rotates 90°, Right-click or ESC to finish)`);
+  }, []);
+
+  // Rotate placement ghost 90 degrees (Scroll wheel on canvas)
+  const rotatePlacement = useCallback(() => {
+    setPlacementGhost((prev) => {
+      if (!prev) return null;
+      soundManager.playTerminalBlip();
+      const newWidth = prev.height;
+      const newHeight = prev.width;
+      const newRot = ((prev.rotation || 0) + 90) % 360;
+      return {
+        ...prev,
+        width: newWidth,
+        height: newHeight,
+        rotation: newRot,
+      };
+    });
   }, []);
 
   // Cancel Placement Mode
   const cancelPlacement = useCallback(() => {
     setPlacementGhost(null);
-    setSystemMessage('Placement cancelled.');
+    setSystemMessage('Placement mode finished.');
   }, []);
 
   // Confirm placing structure at mouse position
@@ -985,11 +1133,67 @@ export function useSurvivalGame() {
       const ghost = placementGhostRef.current;
       if (!ghost) return;
 
+      const curr = survivorRef.current;
+      const allRecipes = [...BUILD_RECIPES, ...WORKBENCH_RECIPES];
+      const activeRecipe = ghost.recipeId ? allRecipes.find((r) => r.id === ghost.recipeId) : null;
+
+      // 1. Synchronously inspect inventory to deduct either prepared kit item or raw crafting materials
+      let currentInv = [...curr.inventory];
+      const itemIdx = currentInv.findIndex(
+        (i) => i.id === ghost.item.id || (i.name === ghost.item.name && (i.count ?? 1) >= 1)
+      );
+
+      if (itemIdx !== -1) {
+        const item = currentInv[itemIdx];
+        if ((item.count ?? 1) > 1) {
+          currentInv[itemIdx] = { ...item, count: (item.count ?? 1) - 1 };
+        } else {
+          currentInv.splice(itemIdx, 1);
+        }
+      } else if (activeRecipe) {
+        // Check if player has the materials to craft and place this structure
+        const canAfford = activeRecipe.ingredients.every((ing) => {
+          const match = currentInv.find(
+            (i) => i.id === ing.itemId || i.name.toLowerCase().includes(ing.name.toLowerCase())
+          );
+          return match && (match.count ?? 1) >= ing.count;
+        });
+
+        if (!canAfford) {
+          soundManager.playAlarmBeep();
+          setSystemMessage(`Out of materials to place ${ghost.item.name}.`);
+          setPlacementGhost(null);
+          return;
+        }
+
+        // Deduct materials for this placed structure
+        activeRecipe.ingredients.forEach((ing) => {
+          const idx = currentInv.findIndex(
+            (i) => i.id === ing.itemId || i.name.toLowerCase().includes(ing.name.toLowerCase())
+          );
+          if (idx !== -1) {
+            const ingItem = currentInv[idx];
+            if ((ingItem.count ?? 1) > ing.count) {
+              currentInv[idx] = { ...ingItem, count: (ingItem.count ?? 1) - ing.count };
+            } else {
+              currentInv.splice(idx, 1);
+            }
+          }
+        });
+      } else {
+        soundManager.playAlarmBeep();
+        setSystemMessage(`Out of ${ghost.item.name} to place.`);
+        setPlacementGhost(null);
+        return;
+      }
+
+      // 2. Spawn placed structure in the world
       const px = Math.round(worldX - ghost.width / 2);
       const py = Math.round(worldY - ghost.height / 2);
 
       const isRainCollector = ghost.structureType === 'rain_collector';
       const isLootContainer = ghost.structureType === 'loot_container';
+      const isDoor = ghost.structureType === 'door_wood';
 
       const newStruct: WorldStructure = {
         id: Math.random().toString(),
@@ -1023,32 +1227,54 @@ export function useSurvivalGame() {
         x: px + ghost.width / 2,
         y: py - 12,
         angle: 0,
-        text: 'BUILT!',
+        text: isDoor ? 'DOOR BUILT! [F]' : 'BUILT!',
         color: '#10b981',
         durationMs: 900,
       });
 
-      // Deduct from inventory
-      setSurvivor((prev) => {
-        const newInv = prev.inventory
-          .map((i) => (i.id === ghost.item.id ? (i.count && i.count > 1 ? { ...i, count: i.count - 1 } : null) : i))
-          .filter(Boolean) as Item[];
-        return {
-          ...prev,
-          activeAction: {
-            type: 'tool_hammer',
-            timestamp: Date.now(),
-            durationMs: 250,
-            angle: Math.atan2(py - prev.y, px - prev.x),
-          },
-          inventory: newInv,
-        };
-      });
+      // Update survivor inventory
+      setSurvivor((prev) => ({
+        ...prev,
+        activeAction: {
+          type: 'tool_hammer',
+          timestamp: Date.now(),
+          durationMs: 250,
+          angle: Math.atan2(py - prev.y, px - prev.x),
+        },
+        inventory: currentInv,
+      }));
 
-      setPlacementGhost(null);
-      setSystemMessage(`Placed ${newStruct.name} down on the map!`);
+      // 3. Synchronously check if player still has materials for ANOTHER structure!
+      let canRepeat = false;
+      const nextItemIdx = currentInv.findIndex(
+        (i) => i.id === ghost.item.id || (i.name === ghost.item.name && (i.count ?? 1) >= 1)
+      );
+
+      if (nextItemIdx !== -1) {
+        canRepeat = true;
+      } else if (activeRecipe) {
+        const canAffordNext = activeRecipe.ingredients.every((ing) => {
+          const match = currentInv.find(
+            (i) => i.id === ing.itemId || i.name.toLowerCase().includes(ing.name.toLowerCase())
+          );
+          return match && (match.count ?? 1) >= ing.count;
+        });
+        if (canAffordNext) {
+          canRepeat = true;
+        }
+      }
+
+      if (canRepeat) {
+        // Keep ghost active so player can continuously place multiples!
+        setSystemMessage(
+          `Built ${newStruct.name}! Left-click to place another, Scroll to rotate 90°, Right-click to finish.`
+        );
+      } else {
+        setPlacementGhost(null);
+        setSystemMessage(`Built ${newStruct.name}! Out of materials to place another.`);
+      }
     },
-    [emitSound]
+    [emitSound, triggerAnimation]
   );
 
   // Evolution complaints from party members on every 5th day
@@ -1266,7 +1492,7 @@ export function useSurvivalGame() {
       if (rolledInfection) {
         soundManager.playZombieGrowl();
         soundManager.playAlarmBeep();
-        setSystemMessage('☠️ CRITICAL: You collapsed outside unprotected! You awake with a gruesome bite mark. The Knox infection is coursing through your veins!');
+        setSystemMessage('☠️ CRITICAL: You collapsed outside unprotected! You awake with a gruesome bite mark. The Charval infection is coursing through your veins!');
       } else if (isInside) {
         setSystemMessage(`Day ${nextDay}. You collapsed indoors from exhaustion. Walls sheltered you from the roaming horde.`);
       } else {
@@ -1571,7 +1797,7 @@ export function useSurvivalGame() {
           soundManager.playAlarmBeep();
         } else if (prev.isBitten && virus >= 100) {
           setIsGameOver(true);
-          setDeathCause('KNOX VIRUS: 100% infection reached. Brain stem destroyed.');
+          setDeathCause('CHARVAL VIRUS: 100% infection reached. Brain stem destroyed.');
           soundManager.playAlarmBeep();
         }
 
@@ -1786,7 +2012,7 @@ export function useSurvivalGame() {
               return {
                 ...struct,
                 hp: newHp,
-                name: newHp >= struct.maxHp ? 'Knox Red Oak' : 'Young Pine Sapling',
+                name: newHp >= struct.maxHp ? 'Charval Red Oak' : 'Young Pine Sapling',
               };
             }
           }
@@ -1801,7 +2027,9 @@ export function useSurvivalGame() {
         const currZombies = zombiesRef.current;
         const currStructures = structuresRef.current;
 
-        return prevNpcs.map((npc) => {
+        const base = homeBaseRef.current;
+
+        return prevNpcs.map((npc, npcIdx) => {
           if (npc.hp <= 0 || npc.state !== 'recruited') return npc;
 
           let targetX = npc.targetX ?? npc.x;
@@ -1814,9 +2042,17 @@ export function useSurvivalGame() {
           let newThirst = Math.max(0, (npc.thirst ?? 100) - 0.12);
           let newFatigue = Math.min(100, (npc.fatigue ?? 0) + 0.05);
 
-          // NEED 1: THIRST (Autonomous drink from canteen or nearby rain barrel / chest at base)
+          // Find beds / sleeping mats located strictly within the Home Base sector
+          const baseBeds = currStructures.filter(
+            (st) =>
+              (st.type === 'bed' || st.type === 'sleeping_mat') &&
+              Math.floor(st.x / 800) === base.sectorX &&
+              Math.floor(st.y / 800) === base.sectorY
+          );
+          const hasBaseBed = baseBeds.length > 0;
+
+          // NEED 1: THIRST (Autonomous drink from personal canteen or rain barrel strictly in Home Base sector)
           if (newThirst < 50) {
-            // First check personal inventory for refillable canteen or drink
             const drinkItem = npcInv.find(
               (i) => i.category === 'drink' && (!i.isRefillable || (i.currentSips ?? 0) > 0)
             );
@@ -1840,16 +2076,19 @@ export function useSurvivalGame() {
                 durationMs: 1200,
               });
             } else {
-              // Look for nearby Rain Collector Barrel with water near base
+              // Only search for rain barrels located inside the Home Base sector
               const rainBarrel = currStructures.find(
-                (st) => st.type === 'rain_collector' && (st.waterStored || 0) > 0
+                (st) =>
+                  st.type === 'rain_collector' &&
+                  (st.waterStored || 0) > 0 &&
+                  Math.floor(st.x / 800) === base.sectorX &&
+                  Math.floor(st.y / 800) === base.sectorY
               );
               if (rainBarrel) {
                 targetX = rainBarrel.x + rainBarrel.width / 2;
                 targetY = rainBarrel.y + rainBarrel.height / 2;
                 const bDist = Math.hypot(targetX - npc.x, targetY - npc.y);
                 if (bDist <= 65) {
-                  // Drink and refill canteen to full!
                   setStructures((allS) =>
                     allS.map((st) =>
                       st.id === rainBarrel.id
@@ -1867,7 +2106,7 @@ export function useSurvivalGame() {
                     x: npc.x,
                     y: npc.y - 18,
                     angle: 0,
-                    text: `${npc.name.split(' ')[0]}: Refilled & Drank at Rain Barrel`,
+                    text: `${npc.name.split(' ')[0]}: Refilled & Drank at Base Barrel`,
                     color: '#38bdf8',
                     durationMs: 1400,
                   });
@@ -1876,7 +2115,7 @@ export function useSurvivalGame() {
             }
           }
 
-          // NEED 2: HUNGER (Autonomous eating from inventory or base food chest)
+          // NEED 2: HUNGER (Autonomous eating from personal inventory or food chest strictly in Home Base sector)
           if (newHunger < 50) {
             const foodItem = npcInv.find((i) => i.category === 'food');
             if (foodItem) {
@@ -1896,10 +2135,12 @@ export function useSurvivalGame() {
                 durationMs: 1200,
               });
             } else {
-              // Look for base storage chest with food
+              // Only search for food chests inside the Home Base sector
               const chestWithFood = currStructures.find(
                 (st) =>
                   st.type === 'loot_container' &&
+                  Math.floor(st.x / 800) === base.sectorX &&
+                  Math.floor(st.y / 800) === base.sectorY &&
                   st.containedLoot?.some((i) => i.category === 'food')
               );
               if (chestWithFood) {
@@ -1907,7 +2148,6 @@ export function useSurvivalGame() {
                 targetY = chestWithFood.y + chestWithFood.height / 2;
                 const cDist = Math.hypot(targetX - npc.x, targetY - npc.y);
                 if (cDist <= 65) {
-                  // Take 1 food ration from chest and eat
                   setStructures((allS) =>
                     allS.map((st) => {
                       if (st.id === chestWithFood.id && st.containedLoot) {
@@ -1931,7 +2171,7 @@ export function useSurvivalGame() {
                     x: npc.x,
                     y: npc.y - 18,
                     angle: 0,
-                    text: `${npc.name.split(' ')[0]}: Ate Rations from Chest`,
+                    text: `${npc.name.split(' ')[0]}: Ate Rations from Base Chest`,
                     color: '#f59e0b',
                     durationMs: 1400,
                   });
@@ -1940,27 +2180,53 @@ export function useSurvivalGame() {
             }
           }
 
-          // NEED 3: REST & EXHAUSTION (Go to bed/mat to recover)
-          if (newFatigue > 80 && npc.assignedTask !== 'follow') {
-            const bed = currStructures.find(
-              (st) => st.type === 'bed' || st.type === 'sleeping_mat'
-            );
-            if (bed) {
+          // NEED 3: EXHAUSTION FALLBACK (If fatigue > 85 and not following, go to base bed; if no bed, cannot sleep!)
+          if (newFatigue > 85 && npc.assignedTask !== 'follow') {
+            if (hasBaseBed) {
+              const bed = baseBeds[npcIdx % baseBeds.length];
               targetX = bed.x + bed.width / 2;
               targetY = bed.y + bed.height / 2;
               const bDist = Math.hypot(targetX - npc.x, targetY - npc.y);
-              if (bDist <= 65) {
+              if (bDist <= 60) {
                 newFatigue = Math.max(0, newFatigue - 3.5);
                 newHp = Math.min(npc.maxHp, newHp + 1.2);
               }
+            } else {
+              // No bed at base: they stay at base and do not get to sleep
+              targetX = base.x + ((npcIdx % 2 === 0 ? 1 : -1) * 35);
+              targetY = base.y + ((npcIdx > 1 ? 1 : -1) * 35);
             }
           }
 
+          // TASK: REST / SLEEP (Must sleep at new base; if no bed in base sector, they do NOT sleep)
           if (npc.assignedTask === 'rest') {
-            targetX = 420;
-            targetY = 280;
-            if (newHp < npc.maxHp) newHp = Math.min(npc.maxHp, newHp + 1.5);
-            newFatigue = Math.max(0, newFatigue - 3.0);
+            if (hasBaseBed) {
+              const assignedBed = baseBeds[npcIdx % baseBeds.length];
+              targetX = assignedBed.x + assignedBed.width / 2;
+              targetY = assignedBed.y + assignedBed.height / 2;
+              const bDist = Math.hypot(targetX - npc.x, targetY - npc.y);
+              if (bDist <= 60) {
+                // In bed at home base -> Recover fatigue & HP
+                if (newHp < npc.maxHp) newHp = Math.min(npc.maxHp, newHp + 1.5);
+                newFatigue = Math.max(0, newFatigue - 3.5);
+              }
+            } else {
+              // NO BED AT BASE: They don't get to sleep!
+              targetX = base.x + ((npcIdx % 2 === 0 ? 1 : -1) * 35);
+              targetY = base.y + ((npcIdx > 1 ? 1 : -1) * 35);
+              // Fatigue does NOT recover without a bed
+              if (Date.now() % 14000 < 1000) {
+                triggerAnimation({
+                  type: 'floating_text',
+                  x: npc.x,
+                  y: npc.y - 18,
+                  angle: 0,
+                  text: `${npc.name.split(' ')[0]}: No Bed at Base! Cannot sleep`,
+                  color: '#f87171',
+                  durationMs: 1600,
+                });
+              }
+            }
             return {
               ...npc,
               targetX,
@@ -1973,6 +2239,7 @@ export function useSurvivalGame() {
             };
           }
 
+          // TASK: FOLLOW (Follow player closely and guard them)
           if (npc.assignedTask === 'follow') {
             const distToPlayer = Math.hypot(s.x - npc.x, s.y - npc.y);
             const threatZombie = currZombies.find(
@@ -2030,8 +2297,12 @@ export function useSurvivalGame() {
               targetY = s.y - Math.sin(s.angle) * 35;
             }
           } else if (npc.assignedTask === 'patrol') {
+            // TASK: PATROL (Patrol strictly the Home Base sector and eliminate any zombies in that sector)
             const baseZombie = currZombies.find(
-              (z) => z.hp > 0 && Math.hypot(z.x - 480, z.y - 360) < 320
+              (z) =>
+                z.hp > 0 &&
+                ((Math.floor(z.x / 800) === base.sectorX && Math.floor(z.y / 800) === base.sectorY) ||
+                  Math.hypot(z.x - base.x, z.y - base.y) < 380)
             );
 
             if (baseZombie) {
@@ -2081,20 +2352,26 @@ export function useSurvivalGame() {
                 );
               }
             } else {
+              // Patrol waypoints around perimeter of the current Home Base sector
+              const pRadiusX = 140;
+              const pRadiusY = 100;
               const waypoints = [
-                { x: 300, y: 220 },
-                { x: 640, y: 220 },
-                { x: 640, y: 480 },
-                { x: 300, y: 480 },
+                { x: base.x - pRadiusX, y: base.y - pRadiusY },
+                { x: base.x + pRadiusX, y: base.y - pRadiusY },
+                { x: base.x + pRadiusX, y: base.y + pRadiusY },
+                { x: base.x - pRadiusX, y: base.y + pRadiusY },
               ];
-              const wpIndex = Math.floor(Date.now() / 5000) % waypoints.length;
+              const wpIndex = (Math.floor(Date.now() / 6000) + npcIdx) % waypoints.length;
               targetX = waypoints[wpIndex].x;
               targetY = waypoints[wpIndex].y;
             }
           } else if (npc.assignedTask === 'maintain') {
+            // TASK: MAINTAIN (Only repair structures within the Home Base sector: pre-existing structures and anything player built there)
             const damaged = currStructures.find(
               (st) =>
                 st.hp < st.maxHp &&
+                Math.floor(st.x / 800) === base.sectorX &&
+                Math.floor(st.y / 800) === base.sectorY &&
                 (st.type.includes('wall') || st.type.includes('fence') || st.type === 'door_wood' || st.type === 'barricade_window')
             );
 
@@ -2129,8 +2406,10 @@ export function useSurvivalGame() {
                 );
               }
             } else {
-              targetX = 420;
-              targetY = 270;
+              // Return to Home Base location when all structures in home sector are fully repaired
+              const offsetSeed = parseInt(npc.id.replace(/\D/g, '') || '1', 10);
+              targetX = base.x + Math.sin(Date.now() / 3500 + offsetSeed) * 35;
+              targetY = base.y + Math.cos(Date.now() / 3500 + offsetSeed) * 35;
             }
           }
 
@@ -2471,64 +2750,216 @@ export function useSurvivalGame() {
       setSurvivor((prev) => {
         if (prev.isSleeping || isGameOverRef.current) return prev; // Cannot move while asleep in bed or dead
 
-        let speed = 2.2;
-        if (running && prev.endurance > 10) speed = 4.2;
-        if (sneaking) speed = 1.2;
+        let speed = 2.4;
+        if (running && prev.endurance > 10) speed = 4.4;
+        if (sneaking) speed = 1.3;
         if (prev.fatigue > 70) speed *= 0.6;
         if (prev.injuries.some((i) => i.part.includes('Leg'))) speed *= 0.7;
 
-        // Rain slows players and survivors to 75% speed! (2.2 * 0.75 = 1.65 px/tick)
+        // Rain slows players and survivors slightly
         const currWeather = environmentRef.current.weather;
         const isRaining = currWeather === 'Heavy Rain' || currWeather === 'Thunderstorm' || currWeather === 'Freezing Rain';
         if (isRaining) {
-          speed *= 0.75;
+          speed *= 0.8;
         }
 
-        const nextX = prev.x + dx * speed;
-        const nextY = prev.y + dy * speed;
-        const angle = Math.atan2(dy, dx);
-
         const currStructures = structuresRef.current;
-        const collides = currStructures.some((s) => {
-          if (s.type === 'tree' || s.type === 'table_chair' || s.type === 'bed' || s.type === 'sleeping_mat') return false;
-          if (s.type === 'door_wood' && s.isOpen) return false;
-          // Thin collision margin for walls so player smoothly glides through open doorways without sticking
-          const margin = s.type.includes('wall') ? 5 : 8;
-          return (
-            nextX >= s.x - margin &&
-            nextX <= s.x + s.width + margin &&
-            nextY >= s.y - margin &&
-            nextY <= s.y + s.height + margin
-          );
-        });
+        const PLAYER_RADIUS = 3.5; // Compact foot contact radius for effortlessly gliding through doorways, around fences, and between furniture
 
-        if (collides) return prev;
+        // Check if structure is solid obstacle
+        const isSolid = (s: WorldStructure): boolean => {
+          if (
+            s.type === 'tree' ||
+            s.type === 'table_chair' ||
+            s.type === 'bed' ||
+            s.type === 'sleeping_mat' ||
+            s.type === 'fruit_bush' ||
+            s.type === 'campfire'
+          ) {
+            return false;
+          }
+          // Open doors are never solid obstacles
+          if (s.type === 'door_wood' && s.isOpen) {
+            return false;
+          }
+          return true;
+        };
+
+        // Inset interactive furniture and containers so player never gets snagged when approaching or interacting
+        const getColliderBox = (s: WorldStructure) => {
+          let bx = s.x;
+          let by = s.y;
+          let bw = s.width;
+          let bh = s.height;
+          if (
+            s.type === 'workbench' ||
+            s.type === 'kitchen_stove' ||
+            s.type === 'loot_container' ||
+            s.type === 'rain_collector'
+          ) {
+            bx += 5;
+            by += 5;
+            bw = Math.max(4, bw - 10);
+            bh = Math.max(4, bh - 10);
+          }
+          return { bx, by, bw, bh };
+        };
+
+        // Circle vs AABB collision test
+        const collidesAt = (testPx: number, testPy: number, radius = PLAYER_RADIUS): boolean => {
+          for (const s of currStructures) {
+            if (!isSolid(s)) continue;
+            const { bx, by, bw, bh } = getColliderBox(s);
+            const closestX = Math.max(bx, Math.min(testPx, bx + bw));
+            const closestY = Math.max(by, Math.min(testPy, by + bh));
+            const distX = testPx - closestX;
+            const distY = testPy - closestY;
+            if (distX * distX + distY * distY < radius * radius) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+        // Unstuck depenetration: if player is deeply inside or overlapping any solid, find minimum push vector
+        const getDepenetration = (testPx: number, testPy: number, radius = PLAYER_RADIUS) => {
+          let pushX = 0;
+          let pushY = 0;
+          let hasPen = false;
+
+          for (const s of currStructures) {
+            if (!isSolid(s)) continue;
+            const { bx, by, bw, bh } = getColliderBox(s);
+
+            // Is center strictly inside box?
+            if (testPx >= bx && testPx <= bx + bw && testPy >= by && testPy <= by + bh) {
+              hasPen = true;
+              const dLeft = testPx - bx + radius + 1;
+              const dRight = bx + bw - testPx + radius + 1;
+              const dTop = testPy - by + radius + 1;
+              const dBottom = by + bh - testPy + radius + 1;
+              const minD = Math.min(dLeft, dRight, dTop, dBottom);
+              if (minD === dLeft) pushX -= dLeft;
+              else if (minD === dRight) pushX += dRight;
+              else if (minD === dTop) pushY -= dTop;
+              else pushY += dBottom;
+            } else {
+              const closestX = Math.max(bx, Math.min(testPx, bx + bw));
+              const closestY = Math.max(by, Math.min(testPy, by + bh));
+              const distX = testPx - closestX;
+              const distY = testPy - closestY;
+              const distSq = distX * distX + distY * distY;
+              if (distSq < (radius - 0.2) * (radius - 0.2)) {
+                const dist = Math.sqrt(distSq);
+                if (dist > 0.001) {
+                  hasPen = true;
+                  const pen = radius - dist;
+                  pushX += (distX / dist) * pen;
+                  pushY += (distY / dist) * pen;
+                }
+              }
+            }
+          }
+          return { hasPen, pushX, pushY };
+        };
+
+        // 1. Initial Unstuck Depenetration
+        let startX = prev.x;
+        let startY = prev.y;
+        const depen = getDepenetration(startX, startY);
+        if (depen.hasPen) {
+          startX += depen.pushX;
+          startY += depen.pushY;
+        }
+
+        let moveX = dx;
+        let moveY = dy;
+        if (moveX !== 0 && moveY !== 0) {
+          moveX *= 0.7071;
+          moveY *= 0.7071;
+        }
+        moveX *= speed;
+        moveY *= speed;
+
+        let resolvedX = startX;
+        let resolvedY = startY;
+
+        // 2. Try full diagonal step first
+        if (!collidesAt(resolvedX + moveX, resolvedY + moveY)) {
+          resolvedX += moveX;
+          resolvedY += moveY;
+        } else {
+          // X Movement with Perpendicular Sliding (slides around doors, corners & fence posts)
+          if (moveX !== 0) {
+            if (!collidesAt(resolvedX + moveX, resolvedY)) {
+              resolvedX += moveX;
+            } else {
+              for (const nudge of [2, -2, 4, -4, 6, -6, 8, -8, 10, -10, 12, -12]) {
+                if (!collidesAt(resolvedX + moveX, resolvedY + nudge)) {
+                  resolvedX += moveX;
+                  resolvedY += nudge * 0.45;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Y Movement with Perpendicular Sliding (slides through doorways & past fence ends)
+          if (moveY !== 0) {
+            if (!collidesAt(resolvedX, resolvedY + moveY)) {
+              resolvedY += moveY;
+            } else {
+              for (const nudge of [2, -2, 4, -4, 6, -6, 8, -8, 10, -10, 12, -12]) {
+                if (!collidesAt(resolvedX + nudge, resolvedY + moveY)) {
+                  resolvedX += nudge * 0.45;
+                  resolvedY += moveY;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // If no position change occurred and inputs were pressed, player is blocked
+        if (resolvedX === prev.x && resolvedY === prev.y && (dx !== 0 || dy !== 0)) {
+          return prev;
+        }
 
         // Check procedural chunks around next player location
-        updateProceduralChunks(nextX, nextY);
+        updateProceduralChunks(resolvedX, resolvedY);
 
         const noise = running ? 45 : sneaking ? 8 : 20;
         if (Math.random() < (running ? 0.2 : 0.05)) {
-          emitSound(nextX, nextY, noise * 4, noise, running ? 'Footsteps (Running)' : 'Footsteps');
+          emitSound(resolvedX, resolvedY, noise * 4, noise, running ? 'Footsteps (Running)' : 'Footsteps');
         }
+
+        const angle = dx !== 0 || dy !== 0 ? Math.atan2(dy, dx) : prev.angle;
 
         return {
           ...prev,
-          x: nextX,
-          y: nextY,
-          angle: dx !== 0 || dy !== 0 ? angle : prev.angle,
+          x: resolvedX,
+          y: resolvedY,
+          angle,
           isRunning: running,
           isSneaking: sneaking,
           isBlocking: false,
         };
       });
     },
-    [emitSound]
+    [emitSound, updateProceduralChunks]
   );
 
-  // Left Click Action: Handles Placement / Shoot / Block / Attack depending on active slot!
+  // Left Click Action: Handles Placement / Looting / Workbench / Kitchen / Shoot / Block / Attack depending on target and active slot!
   const handlePrimaryAction = useCallback(
-    (targetWorldX: number, targetWorldY: number) => {
+    (
+      targetWorldX: number,
+      targetWorldY: number,
+      options?: {
+        onOpenWorkbench?: () => void;
+        onOpenKitchen?: () => void;
+        onOpenChest?: (chest: WorldStructure) => void;
+      }
+    ) => {
       if (isGameOverRef.current) return;
 
       // 1. If in Placement Mode -> Left Click Places Structure!
@@ -2543,6 +2974,86 @@ export function useSurvivalGame() {
         return;
       }
 
+      // 2. Click to trigger Looting on loot containers & storage chests within reach
+      const clickedContainer = structuresRef.current.find((s) => {
+        if (s.type !== 'loot_container') return false;
+        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
+        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+        return dClick <= 40 && dPlayer <= 110;
+      });
+
+      if (clickedContainer) {
+        soundManager.playChestSound();
+        if (options?.onOpenChest) {
+          options.onOpenChest(clickedContainer);
+        } else {
+          setActiveChest(clickedContainer);
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: clickedContainer.x + clickedContainer.width / 2,
+          y: clickedContainer.y - 12,
+          angle: 0,
+          text: 'LOOT CONTAINER',
+          color: '#38bdf8',
+          durationMs: 800,
+        });
+        setSystemMessage(`Opened ${clickedContainer.name}.`);
+        return;
+      }
+
+      // 3. Click to trigger Workbench Crafting Table within reach
+      const clickedWorkbench = structuresRef.current.find((s) => {
+        if (s.type !== 'workbench') return false;
+        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
+        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+        return dClick <= 45 && dPlayer <= 110;
+      });
+
+      if (clickedWorkbench) {
+        soundManager.playTerminalBlip();
+        if (options?.onOpenWorkbench) {
+          options.onOpenWorkbench();
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: clickedWorkbench.x + clickedWorkbench.width / 2,
+          y: clickedWorkbench.y - 12,
+          angle: 0,
+          text: 'WORKBENCH CRAFTING',
+          color: '#f59e0b',
+          durationMs: 800,
+        });
+        setSystemMessage(`Accessed ${clickedWorkbench.name} Crafting Table.`);
+        return;
+      }
+
+      // 4. Click to trigger Kitchens / Cooking (Stove & Campfire) within reach
+      const clickedKitchen = structuresRef.current.find((s) => {
+        if (s.type !== 'kitchen_stove' && s.type !== 'campfire') return false;
+        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
+        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+        return dClick <= 45 && dPlayer <= 110;
+      });
+
+      if (clickedKitchen) {
+        soundManager.playTerminalBlip();
+        if (options?.onOpenKitchen) {
+          options.onOpenKitchen();
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: clickedKitchen.x + clickedKitchen.width / 2,
+          y: clickedKitchen.y - 12,
+          angle: 0,
+          text: 'KITCHEN RATIONS',
+          color: '#f97316',
+          durationMs: 800,
+        });
+        setSystemMessage(`${clickedKitchen.name} active for food rations & cooking.`);
+        return;
+      }
+
       // Determine active item
       const activeItem =
         curr.activeSlot === 'weapon1'
@@ -2550,6 +3061,112 @@ export function useSurvivalGame() {
           : curr.activeSlot === 'weapon2'
           ? curr.equippedWeapon2
           : curr.equippedTool;
+
+      const isHoldingHammer =
+        (activeItem?.name.toLowerCase().includes('hammer') || activeItem?.id.toLowerCase().includes('hammer')) ||
+        (curr.activeSlot === 'tool' && curr.equippedTool?.name.toLowerCase().includes('hammer'));
+
+      // 5. Demolish / Break down walls with Hammer (takes 5 clicks, recovers 50% wood and nails!)
+      const clickedWall = structuresRef.current.find((s) => {
+        if (!s.type.includes('wall')) return false;
+        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
+        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+        return dClick <= 35 && dPlayer <= 90;
+      });
+
+      if (isHoldingHammer && clickedWall) {
+        soundManager.playHammerSound();
+        emitSound(clickedWall.x, clickedWall.y, 45, 20, 'Tearing Down Wall');
+        const nextHits = (clickedWall.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_hammer',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x),
+          durationMs: 300,
+        });
+
+        if (nextHits >= 5) {
+          // Wall completely broken down!
+          setStructures((prev) => prev.filter((s) => s.id !== clickedWall.id));
+
+          // 50% of wall materials (Wall costs 3 wood planks & 3 nails -> 50% recovers 2 wood planks & 2 nails!)
+          const planksYield = 2;
+          const nailsYield = 2;
+
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id === 'inv_planks' || i.name.toLowerCase().includes('plank'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + planksYield };
+            } else {
+              inv.push({
+                id: 'inv_planks',
+                name: 'Wood Planks',
+                category: 'resource',
+                description: 'Reclaimed pine timber planks from dismantled wall.',
+                weight: 1.5,
+                count: planksYield,
+              });
+            }
+
+            const nIdx = inv.findIndex((i) => i.id === 'inv_nails' || i.name.toLowerCase().includes('nail'));
+            if (nIdx !== -1) {
+              inv[nIdx] = { ...inv[nIdx], count: (inv[nIdx].count ?? 1) + nailsYield };
+            } else {
+              inv.push({
+                id: 'inv_nails',
+                name: 'Box of Nails',
+                category: 'resource',
+                description: 'Reclaimed construction nails from dismantled wall.',
+                weight: 0.5,
+                count: nailsYield,
+              });
+            }
+
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 4),
+              fatigue: Math.min(100, prev.fatigue + 2),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: clickedWall.x + clickedWall.width / 2,
+            y: clickedWall.y - 14,
+            angle: 0,
+            text: `WALL TORN DOWN! +${planksYield} PLANKS, +${nailsYield} NAILS`,
+            color: '#10b981',
+            durationMs: 1400,
+          });
+
+          setSystemMessage(
+            `Tore down ${clickedWall.name} with Hammer! Recovered ${planksYield}x Wood Planks & ${nailsYield}x Nails (50% materials).`
+          );
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === clickedWall.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `DISMANTLING WALL (${nextHits}/5)`,
+            color: '#f59e0b',
+            durationMs: 700,
+          });
+
+          setSystemMessage(
+            `Dismantling ${clickedWall.name}... (${nextHits}/5 hammer clicks). ${5 - nextHits} clicks remaining to tear down.`
+          );
+        }
+        return;
+      }
 
       const weaponType = activeItem?.weaponType || 'melee';
 
@@ -2815,26 +3432,23 @@ export function useSurvivalGame() {
     [confirmPlacement, emitSound, wakeUp]
   );
 
-  // Distance from point to axis-aligned bounding box
-  const getDistToBox = (px: number, py: number, bx: number, by: number, bw: number, bh: number) => {
-    const nearestX = Math.max(bx, Math.min(px, bx + bw));
-    const nearestY = Math.max(by, Math.min(py, by + bh));
-    return Math.hypot(px - nearestX, py - nearestY);
-  };
-
-  // 1. World Action & Interact (Default Key: [F])
+  // 1. World Action & Interact (Default Key: [E] or [F])
   // Handles: Open/Close Doors, Jump Fences, Looting Chests, Cutting Trees, Collecting Items, Going to Bed
   const interactWorldAction = useCallback(
-    (onOpenWorkbench?: () => void, onOpenChest?: (chest: WorldStructure) => void) => {
+    (
+      onOpenWorkbench?: () => void,
+      onOpenChest?: (chest: WorldStructure) => void,
+      onOpenKitchen?: () => void
+    ): boolean => {
       const curr = survivorRef.current;
       if (curr.isSleeping) {
         wakeUp();
-        return;
+        return true;
       }
 
       const currStructures = structuresRef.current;
 
-      // A. Check for DOORS to open/close (within 85px of door boundary) - HIGHEST PRIORITY & 100% RELIABLE
+      // A. Check for DOORS to open/close (within 100px of door boundary) - HIGHEST PRIORITY & 100% RELIABLE
       const nearestDoor = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'door_wood') return acc;
@@ -2842,7 +3456,7 @@ export function useSurvivalGame() {
           if (d < acc.dist) return { struct: s, dist: d };
           return acc;
         },
-        { struct: null, dist: 85 }
+        { struct: null, dist: 100 }
       );
 
       if (nearestDoor.struct) {
@@ -2863,10 +3477,10 @@ export function useSurvivalGame() {
           durationMs: 800,
         });
         setSystemMessage(nextState ? `Unlatched and opened ${target.name}.` : `Closed and slide-bolted ${target.name}.`);
-        return;
+        return true;
       }
 
-      // B. Check for nearby Fence to VAULT / JUMP OVER [F] (within 48px of fence boundary)
+      // B. Check for nearby Fence to VAULT / JUMP OVER [E/F] (within 55px of fence boundary)
       const nearestFence = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'fence_wood' && s.type !== 'fence_wire') return acc;
@@ -2874,7 +3488,7 @@ export function useSurvivalGame() {
           if (d < acc.dist) return { struct: s, dist: d };
           return acc;
         },
-        { struct: null, dist: 48 }
+        { struct: null, dist: 55 }
       );
 
       if (nearestFence.struct) {
@@ -2917,10 +3531,10 @@ export function useSurvivalGame() {
           endurance: Math.max(0, s.endurance - 3),
         }));
         setSystemMessage(`Vaulted over ${fence.name}!`);
-        return;
+        return true;
       }
 
-      // C. Check for BED / SLEEPING MAT to go to bed [F]
+      // C. Check for BED / SLEEPING MAT to go to bed [E/F]
       const nearestBed = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'bed' && s.type !== 'sleeping_mat') return acc;
@@ -2928,15 +3542,15 @@ export function useSurvivalGame() {
           if (d < acc.dist) return { struct: s, dist: d };
           return acc;
         },
-        { struct: null, dist: 70 }
+        { struct: null, dist: 80 }
       );
 
       if (nearestBed.struct) {
         startSleeping(nearestBed.struct);
-        return;
+        return true;
       }
 
-      // D. Check for LOOT CONTAINER & STORAGE CHEST [F]
+      // D. Check for LOOT CONTAINER & STORAGE CHEST [E/F]
       const nearestChest = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'loot_container') return acc;
@@ -2956,10 +3570,10 @@ export function useSurvivalGame() {
           setActiveChest(target);
         }
         setSystemMessage(`Opened ${target.name}. Store food, drink, and supplies for the colony.`);
-        return;
+        return true;
       }
 
-      // E. Check for RAIN COLLECTOR BARREL [F] (Holds up to 50 bottle refills!)
+      // E. Check for RAIN COLLECTOR BARREL [E/F] (Holds up to 50 bottle refills!)
       const nearestBarrel = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'rain_collector') return acc;
@@ -2976,7 +3590,7 @@ export function useSurvivalGame() {
         if (water <= 0) {
           soundManager.playTerminalBlip();
           setSystemMessage('⚠️ Rain Collector Barrel is empty (0/50 refills). Wait for rainfall to collect water.');
-          return;
+          return true;
         }
 
         const canteen = curr.inventory.find((i) => i.isRefillable);
@@ -3012,7 +3626,7 @@ export function useSurvivalGame() {
             durationMs: 1300,
           });
           setSystemMessage(`Refilled canteen to full! (${newWater}/50 bottle refills remaining in barrel).`);
-          return;
+          return true;
         }
 
         if (curr.thirst < 85) {
@@ -3032,14 +3646,14 @@ export function useSurvivalGame() {
             durationMs: 1300,
           });
           setSystemMessage(`Drank directly from rain barrel! (+45% Hydration, ${newWater}/50 refills left).`);
-          return;
+          return true;
         }
 
         setSystemMessage(`Rain Collector Barrel has ${water}/50 bottle refills. Canteen & hydration already full.`);
-        return;
+        return true;
       }
 
-      // F. Check for FRUIT BUSH HARVEST [F]
+      // F. Check for FRUIT BUSH HARVEST [E/F]
       const nearestFruit = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'fruit_bush' || (s.fruitCount ?? 0) <= 0) return acc;
@@ -3084,10 +3698,10 @@ export function useSurvivalGame() {
           durationMs: 1200,
         });
         setSystemMessage(`Harvested ${count}x ${fruitName} from ${target.name}! Added to Backpack.`);
-        return;
+        return true;
       }
 
-      // G. Check for TREE to chop [F]
+      // G. Check for TREE to chop [E/F]
       const nearestTree = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'tree') return acc;
@@ -3169,10 +3783,10 @@ export function useSurvivalGame() {
           );
           setSystemMessage(`Chopping timber... (${newHp}/${target.maxHp} HP)`);
         }
-        return;
+        return true;
       }
 
-      // H. Check for WORKBENCH [F]
+      // H. Check for WORKBENCH [E/F]
       const nearestBench = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
           if (s.type !== 'workbench') return acc;
@@ -3187,7 +3801,7 @@ export function useSurvivalGame() {
         soundManager.playTerminalBlip();
         setSystemMessage('Accessed Carpentry Workbench.');
         if (onOpenWorkbench) onOpenWorkbench();
-        return;
+        return true;
       }
 
       // I. Stove, Campfire, Table
@@ -3205,7 +3819,8 @@ export function useSurvivalGame() {
         if (target.type === 'kitchen_stove' || target.type === 'campfire') {
           soundManager.playTerminalBlip();
           setSystemMessage(`${target.name} ready for boiling and cooking.`);
-          return;
+          if (onOpenKitchen) onOpenKitchen();
+          return true;
         }
         if (target.type === 'table_chair') {
           soundManager.playTerminalBlip();
@@ -3216,11 +3831,11 @@ export function useSurvivalGame() {
             endurance: Math.min(100, s.endurance + 25),
           }));
           setSystemMessage('Sat at dining table. Anxiety and boredom cleared.');
-          return;
+          return true;
         }
       }
 
-      setSystemMessage('No interactable door, fence, or object within reach [F].');
+      return false;
     },
     [emitSound, startSleeping, wakeUp]
   );
@@ -3595,9 +4210,21 @@ export function useSurvivalGame() {
   const setNpcTask = useCallback(
     (npcId: string, task: NpcTask) => {
       soundManager.playTerminalBlip();
+      const base = homeBaseRef.current;
+      const currStructures = structuresRef.current;
+      const hasBaseBed = currStructures.some(
+        (st) =>
+          (st.type === 'bed' || st.type === 'sleeping_mat') &&
+          Math.floor(st.x / 800) === base.sectorX &&
+          Math.floor(st.y / 800) === base.sectorY
+      );
+
+      let targetNpcName = 'Survivor';
+
       setNpcs((prev) =>
         prev.map((n) => {
           if (n.id === npcId) {
+            targetNpcName = n.name.split(' ')[0];
             triggerAnimation({
               type: 'floating_text',
               x: n.x,
@@ -3607,12 +4234,34 @@ export function useSurvivalGame() {
               color: '#38bdf8',
               durationMs: 1200,
             });
-            return { ...n, assignedTask: task };
+
+            // Redirect to base sector coordinates immediately if not following player
+            let targetX = n.targetX;
+            let targetY = n.targetY;
+            if (task !== 'follow') {
+              targetX = base.x;
+              targetY = base.y;
+            }
+
+            return { ...n, assignedTask: task, targetX, targetY };
           }
           return n;
         })
       );
-      setSystemMessage(`Assigned ${task.toUpperCase()} directive to survivor.`);
+
+      if (task === 'rest') {
+        if (hasBaseBed) {
+          setSystemMessage(`Assigned REST to ${targetNpcName}. Sleeping in Home Base bed to restore fatigue.`);
+        } else {
+          setSystemMessage(`Assigned REST to ${targetNpcName}. ⚠️ Note: No bed in Home Base Sector [${base.sectorX}, ${base.sectorY}]! Survivor cannot sleep until a bed is constructed.`);
+        }
+      } else if (task === 'patrol') {
+        setSystemMessage(`Assigned PATROL to ${targetNpcName}. Patrolling and defending Home Base Sector [${base.sectorX}, ${base.sectorY}].`);
+      } else if (task === 'maintain') {
+        setSystemMessage(`Assigned MAINTAIN to ${targetNpcName}. Repairing structures strictly within Home Base Sector [${base.sectorX}, ${base.sectorY}].`);
+      } else {
+        setSystemMessage(`Assigned FOLLOW to ${targetNpcName}. Accompanying and guarding player.`);
+      }
     },
     [triggerAnimation]
   );
@@ -3824,7 +4473,7 @@ export function useSurvivalGame() {
     ]);
     updateProceduralChunks(INITIAL_SURVIVOR.x, INITIAL_SURVIVOR.y);
 
-    setSystemMessage('Simulation deployed. Survive in Knox County.');
+    setSystemMessage('Simulation deployed. Survive in Charval County.');
   }, [updateProceduralChunks]);
 
   // Colony Storage Chest Management
@@ -3958,6 +4607,7 @@ export function useSurvivalGame() {
     unequipItem,
     startPlacingItem,
     cancelPlacement,
+    rotatePlacement,
     interactNearby,
     interactWorldAction,
     repairNearby,
@@ -3987,5 +4637,9 @@ export function useSurvivalGame() {
     closeChest,
     storeItemInChest,
     takeItemFromChest,
+    // Home Base & Shelter
+    homeBase,
+    currentShelter,
+    setAsHomeBase,
   };
 }

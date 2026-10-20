@@ -189,7 +189,7 @@ export const NewGameMenu: React.FC<NewGameMenuProps> = ({
               </div>
 
               <p className="text-[11px] text-neutral-400 leading-relaxed max-w-md mx-auto">
-                In Knox County, death is permanent and unforgiving. Longest days survived is your ultimate record. Start a new game to deploy a fresh survivor into the sector.
+                In Charval County, death is permanent and unforgiving. Longest days survived is your ultimate record. Start a new game to deploy a fresh survivor into the sector.
               </p>
             </div>
           ) : activeTab === 'keybinds' ? (

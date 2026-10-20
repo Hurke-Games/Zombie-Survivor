@@ -73,11 +73,12 @@ export const KEYBINDING_LABELS: Record<keyof KeyBindings, { title: string; descr
   },
 };
 
-const STORAGE_KEY = 'knox_keybindings_v2';
+const STORAGE_KEY = 'charval_keybindings_v2';
+const LEGACY_STORAGE_KEY = 'knox_keybindings_v2';
 
 export function loadKeyBindings(): KeyBindings {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       return { ...DEFAULT_KEYBINDINGS, ...parsed };

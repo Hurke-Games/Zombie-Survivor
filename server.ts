@@ -24,22 +24,27 @@ const ai = new GoogleGenAI({
   },
 });
 
+// Track whether Gemini API is active or disabled due to invalid/leaked credentials
+let isGeminiAvailable = true;
+
 // Overseer AI Observation generation endpoint
 app.post('/api/overseer/narrate', async (req, res) => {
   try {
     const { gameState, tacticalAction } = req.body;
 
-    // Check if API key is configured
-    if (!process.env.GEMINI_API_KEY) {
+    // Check if API key is configured or currently disabled due to invalid/leaked status
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || apiKey.startsWith('MY_') || !isGeminiAvailable) {
       return res.status(200).json({
+        success: true,
         fallback: true,
-        message: 'No API key configured, using high-fidelity tactical deterministic engine',
+        message: 'Using high-fidelity tactical deterministic engine',
       });
     }
 
     const prompt = `
 You are the Overseer AI, an omniscient "God-view" simulator for a dark, unforgiving zombie survival game inspired by Project Zomboid.
-Observe Knox County from a clinical, top-down satellite / drone perspective.
+Observe Charval County from a clinical, top-down satellite / drone perspective.
 
 Current Simulation State Telemetry:
 - Day: ${gameState?.day ?? 3}
@@ -60,7 +65,7 @@ ${tacticalAction ? `- Player's Chosen Tactical Directive: "${tacticalAction}"` :
 
 Requirements:
 - Atmosphere: Gritty, realistic, clinical, bleak, Project Zomboid style.
-- Perspective: Distant top-down god-view satellite/deity looking down on Knox County.
+- Perspective: Distant top-down god-view satellite/deity looking down on Charval County.
 - Narration: Focus on environmental audio (creaking lumber, muffled shambling, rain patter), structural stress, weather, horde vectors.
 - Sandbox rules: finite resources, equipment degradation, 100% fatal zombie bite infection, sensory triggers (noise/light/blood).
 - Output must use the exact markdown headers specified:
@@ -84,24 +89,48 @@ Requirements:
 [Provide 3-4 realistic, high-stakes tactical choices numbered 1 to 4 with immediate trade-offs (risk vs reward, stamina, noise, durability, health).]
 `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: 'You are the Overseer AI. Cold, clinical, tactical, omniscient narrator of Project Zomboid survival simulation. Format strictly with specified markdown headers.',
-        temperature: 0.7,
-      },
-    });
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          systemInstruction: 'You are the Overseer AI. Cold, clinical, tactical, omniscient narrator of Project Zomboid survival simulation. Format strictly with specified markdown headers.',
+          temperature: 0.7,
+        },
+      });
 
-    const markdownText = response.text || '';
-    res.json({
+      const markdownText = response.text || '';
+      return res.json({
+        success: true,
+        markdown: markdownText,
+      });
+    } catch (genError: any) {
+      const errMsg = genError?.message || String(genError);
+      const isLeakedOrForbidden =
+        genError?.status === 403 ||
+        genError?.code === 403 ||
+        errMsg.includes('leaked') ||
+        errMsg.includes('PERMISSION_DENIED') ||
+        errMsg.includes('API key');
+
+      if (isLeakedOrForbidden) {
+        isGeminiAvailable = false;
+        console.warn('Overseer AI: Gemini API key reported as leaked or unauthorized (HTTP 403). Falling back cleanly to tactical deterministic engine.');
+      } else {
+        console.warn('Overseer AI: Generation call unavailable, falling back to tactical deterministic engine:', errMsg);
+      }
+
+      return res.status(200).json({
+        success: true,
+        fallback: true,
+        message: 'Simulation telemetry generated via deterministic tactical simulation engine',
+      });
+    }
+  } catch (_error: any) {
+    return res.status(200).json({
       success: true,
-      markdown: markdownText,
-    });
-  } catch (error: any) {
-    console.error('Overseer narration API error:', error);
-    res.status(500).json({
-      error: error.message || 'Simulation telemetry processing failure',
+      fallback: true,
+      message: 'Simulation telemetry generated via deterministic tactical simulation engine',
     });
   }
 });

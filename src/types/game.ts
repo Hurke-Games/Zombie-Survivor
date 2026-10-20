@@ -1,5 +1,5 @@
 /**
- * Core types for the Overseer AI Knox County survival simulation.
+ * Core types for the Overseer AI Charval County survival simulation.
  */
 
 export type BodyPart = 'Head' | 'Torso' | 'Left Arm' | 'Right Arm' | 'Left Leg' | 'Right Leg';
@@ -143,6 +143,10 @@ export interface PlacementGhost {
   structureType: StructureType;
   width: number;
   height: number;
+  rotation?: number; // 0, 90, 180, 270 degrees
+  recipeId?: string; // If placed from a crafting recipe for continuous placement
+  originalWidth?: number;
+  originalHeight?: number;
 }
 
 export type ZombieState = 'idle' | 'wandering' | 'tracking' | 'attacking' | 'feeding';
@@ -205,6 +209,15 @@ export interface WorldStructure {
   lastHarvestTime?: number;
   fruitType?: string;
   chunkKey?: string;
+  dismantleHits?: number; // Hammer demolition clicks (takes 5 to tear down)
+}
+
+export interface HomeBase {
+  x: number;
+  y: number;
+  sectorX: number;
+  sectorY: number;
+  name: string;
 }
 
 export type NpcTask = 'follow' | 'patrol' | 'maintain' | 'rest';

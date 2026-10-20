@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSurvivalGame } from './hooks/useSurvivalGame';
 import { SimulationCanvas } from './components/SimulationCanvas';
 import { SurvivorHUD } from './components/SurvivorHUD';
-import { OverseerTerminal } from './components/OverseerTerminal';
+import { SurvivorVitalsPanel } from './components/SurvivorVitalsPanel';
+import { TacticalObjectivesPopover } from './components/TacticalObjectivesPopover';
+import { RightTabsNav, RightTabType } from './components/RightTabsNav';
 import { BuildMenu } from './components/BuildMenu';
 import { WorkbenchCraftModal } from './components/WorkbenchCraftModal';
 import { InventoryModal } from './components/InventoryModal';
@@ -46,6 +48,7 @@ import {
   Wrench,
   Key,
   CheckCircle2,
+  Target,
   Bed,
   AlertTriangle,
 } from 'lucide-react';
@@ -81,6 +84,7 @@ export default function App() {
     unequipItem,
     startPlacingItem,
     cancelPlacement,
+    rotatePlacement,
     interactNearby,
     craftRecipe,
     useItem,
@@ -107,6 +111,9 @@ export default function App() {
     closeChest,
     storeItemInChest,
     takeItemFromChest,
+    homeBase,
+    currentShelter,
+    setAsHomeBase,
   } = useSurvivalGame();
 
   const [keyBindings, setKeyBindings] = useState<KeyBindings>(() => loadKeyBindings());
@@ -118,13 +125,8 @@ export default function App() {
 
   const [isThermalMode, setIsThermalMode] = useState<boolean>(false);
   const [isHeatmapMode, setIsHeatmapMode] = useState<boolean>(true);
-  const [isBuildMenuOpen, setIsBuildMenuOpen] = useState<boolean>(false);
-  const [isWorkbenchCraftOpen, setIsWorkbenchCraftOpen] = useState<boolean>(false);
+  const [activeRightTab, setActiveRightTab] = useState<RightTabType | null>(null);
   const [isInventoryOpen, setIsInventoryOpen] = useState<boolean>(false);
-  const [isEquipmentOpen, setIsEquipmentOpen] = useState<boolean>(false);
-  const [isHungerMenuOpen, setIsHungerMenuOpen] = useState<boolean>(false);
-  const [isThirstMenuOpen, setIsThirstMenuOpen] = useState<boolean>(false);
-  const [isColonyOpen, setIsColonyOpen] = useState<boolean>(false);
   const [selectedNpc, setSelectedNpc] = useState<NpcSurvivor | null>(null);
   const [isNpcModalOpen, setIsNpcModalOpen] = useState<boolean>(false);
   const [tradeNpc, setTradeNpc] = useState<NpcSurvivor | null>(null);
@@ -132,6 +134,47 @@ export default function App() {
   const [isNewGameMenuOpen, setIsNewGameMenuOpen] = useState<boolean>(true); // Initial game start menu
   const [isHelpOpen, setIsHelpOpen] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(soundManager.getMuted());
+  const [isObjectivesOpen, setIsObjectivesOpen] = useState<boolean>(false);
+  const [hoveredQuickType, setHoveredQuickType] = useState<'food' | 'water' | null>(null);
+
+  // Lowest restoring food item (for Quick Eat)
+  const availableFoods = survivor.inventory.filter(
+    (i) => i.category === 'food' && (i.nutrition ?? 0) > 0
+  );
+  const lowestFood =
+    availableFoods.length > 0
+      ? [...availableFoods].sort((a, b) => (a.nutrition ?? 0) - (b.nutrition ?? 0))[0]
+      : null;
+
+  // Lowest restoring drink item (for Quick Drink)
+  const availableDrinks = survivor.inventory.filter(
+    (i) => i.category === 'drink' && (i.hydration ?? 0) > 0
+  );
+  const lowestDrink =
+    availableDrinks.length > 0
+      ? [...availableDrinks].sort((a, b) => (a.hydration ?? 0) - (b.hydration ?? 0))[0]
+      : null;
+
+  const handleQuickEat = () => {
+    if (lowestFood) {
+      useItem(lowestFood);
+    }
+  };
+
+  const handleQuickDrink = () => {
+    if (lowestDrink) {
+      useItem(lowestDrink);
+    }
+  };
+
+  // Total defense calculation for survivor armor rig
+  const armorItems = Object.values(survivor.equippedArmor).filter(Boolean) as Item[];
+  const totalDefense = armorItems.reduce((acc, a) => acc + (a.armorDefense || 0), 0);
+
+  // Toggle right-side tabs: clicking active tab or pressing its key pops it back in
+  const toggleRightTab = (tab: RightTabType) => {
+    setActiveRightTab((prev) => (prev === tab ? null : tab));
+  };
 
   // Embedded Game Viewport Fullscreen Handler (Controlled exclusively via UI button click; no quick key)
   const gameFrameRef = useRef<HTMLDivElement>(null);
@@ -165,7 +208,7 @@ export default function App() {
 
   // Direct trigger for workbench interaction
   const handleOpenWorkbench = () => {
-    setIsWorkbenchCraftOpen(true);
+    setActiveRightTab('bench');
   };
 
   const handleOpenNpc = (npc: NpcSurvivor) => {
@@ -182,137 +225,150 @@ export default function App() {
   const handleStartNewGame = () => {
     resetNewGame();
     setIsNewGameMenuOpen(false);
-    setIsHungerMenuOpen(false);
-    setIsThirstMenuOpen(false);
-    setIsBuildMenuOpen(false);
-    setIsWorkbenchCraftOpen(false);
-    setIsEquipmentOpen(false);
+    setActiveRightTab(null);
     setIsInventoryOpen(false);
-    setIsColonyOpen(false);
     setIsNpcModalOpen(false);
     setIsTradeModalOpen(false);
     setIsHelpOpen(false);
   };
 
-  // Keyboard controls
-  useEffect(() => {
-    const keysDown = new Set<string>();
+  // Persistent pressed keys ref (survives state updates without key loss or choppiness)
+  const keysDownRef = useRef<Set<string>>(new Set());
+  const moveSurvivorRef = useRef(moveSurvivor);
+  moveSurvivorRef.current = moveSurvivor;
+  const interactNearbyRef = useRef(interactNearby);
+  interactNearbyRef.current = interactNearby;
+  const repairNearbyRef = useRef(repairNearby);
+  repairNearbyRef.current = repairNearby;
+  const interactSurvivorRef = useRef(interactSurvivor);
+  interactSurvivorRef.current = interactSurvivor;
+  const isGameOverRef = useRef(isGameOver);
+  isGameOverRef.current = isGameOver;
+  const isNewGameMenuOpenRef = useRef(isNewGameMenuOpen);
+  isNewGameMenuOpenRef.current = isNewGameMenuOpen;
+  const keyBindingsRef = useRef(keyBindings);
+  keyBindingsRef.current = keyBindings;
+  const isNearWorkbenchRef = useRef(isNearWorkbench);
+  isNearWorkbenchRef.current = isNearWorkbench;
+  const cancelPlacementRef = useRef(cancelPlacement);
+  cancelPlacementRef.current = cancelPlacement;
+  const closeChestRef = useRef(closeChest);
+  closeChestRef.current = closeChest;
+  const toggleFlashlightRef = useRef(toggleFlashlight);
+  toggleFlashlightRef.current = toggleFlashlight;
 
+  // Immediate movement step helper
+  const triggerMovementStep = useCallback(() => {
+    if (isNewGameMenuOpenRef.current || isGameOverRef.current) return;
+    const kd = keysDownRef.current;
+    let dx = 0;
+    let dy = 0;
+    if (kd.has('w') || kd.has('arrowup')) dy -= 1;
+    if (kd.has('s') || kd.has('arrowdown')) dy += 1;
+    if (kd.has('a') || kd.has('arrowleft')) dx -= 1;
+    if (kd.has('d') || kd.has('arrowright')) dx += 1;
+
+    if (dx !== 0 || dy !== 0) {
+      const isRunning = kd.has('shift');
+      const isSneaking = kd.has('control');
+      moveSurvivorRef.current(dx, dy, isRunning, isSneaking);
+    }
+  }, []);
+
+  // Keyboard controls listener (stable, never tears down or resets keysDown during gameplay)
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return;
-      if (isGameOver) return;
+      const targetTag = (e.target as HTMLElement).tagName;
+      if (targetTag === 'INPUT' || targetTag === 'TEXTAREA') return;
+      if (isGameOverRef.current) return;
 
       const key = e.key.toLowerCase();
-      keysDown.add(key);
+      keysDownRef.current.add(key);
 
-      if (key === keyBindings.interact) {
-        // [F] default: Doors, Fences, Looting, Trees, Fruit, Rain Barrels, Bed
-        interactNearby(handleOpenWorkbench, openChest);
-      } else if (key === keyBindings.equipment) {
-        // [E] default: Equipment & Armor Rig Screen
-        setIsEquipmentOpen((prev) => !prev);
-      } else if (key === keyBindings.repair) {
-        // [R] default: Dedicated Repair Action
-        repairNearby();
-      } else if (key === keyBindings.survivor) {
-        // [C] default: Survivor Dialogue, Recruiting & Management
-        interactSurvivor(handleOpenNpc);
-      } else if (key === keyBindings.build) {
-        // [B] default: Field Build Menu
-        setIsBuildMenuOpen((prev) => !prev);
-      } else if (key === keyBindings.colony) {
-        // [K] default: Colony Overview
-        setIsColonyOpen((prev) => !prev);
-      } else if (key === keyBindings.flashlight) {
-        // [G] default: Flashlight
-        toggleFlashlight();
-      } else if (key === keyBindings.inventory) {
-        // [I] default: Backpack Inventory
-        setIsInventoryOpen((prev) => !prev);
-      } else if (key === keyBindings.hunger) {
-        // [U] default: Food Rations Menu
-        setIsHungerMenuOpen((prev) => !prev);
-      } else if (key === keyBindings.thirst) {
-        // [Y] default: Water Hydration Menu
-        setIsThirstMenuOpen((prev) => !prev);
-      } else if (key === keyBindings.workbench) {
-        // [H] default: Workbench Crafting Table
-        setIsWorkbenchCraftOpen((prev) => !prev);
+      const bindings = keyBindingsRef.current;
+
+      // Instant 0ms response when a movement key is pressed
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        triggerMovementStep();
+      }
+
+      // World action: [E] or [F]
+      if (key === bindings.interact || key === 'f') {
+        interactNearbyRef.current(handleOpenWorkbench, openChest, () => setActiveRightTab('food'));
+      } else if (key === bindings.equipment || key === 'e') {
+        // If near a door or interactable, prioritize interacting so [E] opens the door!
+        // If no interactable is in reach, open/toggle the Equipment Rig!
+        const didInteract = interactNearbyRef.current(handleOpenWorkbench, openChest, () => setActiveRightTab('food'));
+        if (!didInteract) {
+          toggleRightTab('rig');
+        }
+      } else if (key === bindings.repair || key === 'r') {
+        repairNearbyRef.current();
+      } else if (key === bindings.survivor || key === 'c') {
+        interactSurvivorRef.current(handleOpenNpc);
+      } else if (key === bindings.build || key === 'b') {
+        toggleRightTab('build');
+      } else if (key === bindings.colony || key === 'k') {
+        toggleRightTab('colony');
+      } else if (key === bindings.flashlight || key === 'g') {
+        toggleFlashlightRef.current();
+      } else if (key === bindings.inventory || key === 'i') {
+        toggleRightTab('pack');
+      } else if (key === bindings.hunger || key === 'u') {
+        toggleRightTab('food');
+      } else if (key === bindings.thirst || key === 'y') {
+        toggleRightTab('water');
+      } else if (key === bindings.workbench || key === 'h') {
+        toggleRightTab('bench');
       } else if (key === 'tab') {
         e.preventDefault();
-        if (isNearWorkbench) {
-          setIsWorkbenchCraftOpen((prev) => !prev);
+        if (isNearWorkbenchRef.current) {
+          toggleRightTab('bench');
         } else {
-          setIsBuildMenuOpen((prev) => !prev);
+          toggleRightTab('build');
         }
       } else if (key === 'm') {
         setIsHeatmapMode((prev) => !prev);
       } else if (key === 't') {
         setIsThermalMode((prev) => !prev);
       } else if (key === 'escape') {
-        cancelPlacement();
-        closeChest();
-        setIsHungerMenuOpen(false);
-        setIsThirstMenuOpen(false);
-        setIsBuildMenuOpen(false);
-        setIsWorkbenchCraftOpen(false);
-        setIsEquipmentOpen(false);
+        cancelPlacementRef.current();
+        closeChestRef.current();
+        setActiveRightTab(null);
         setIsInventoryOpen(false);
-        setIsColonyOpen(false);
         setIsNpcModalOpen(false);
         setIsTradeModalOpen(false);
         setIsHelpOpen(false);
-        if (isNewGameMenuOpen && !isGameOver) {
+        if (isNewGameMenuOpenRef.current && !isGameOverRef.current) {
           setIsNewGameMenuOpen(false);
         }
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      keysDown.delete(e.key.toLowerCase());
+      keysDownRef.current.delete(e.key.toLowerCase());
+    };
+
+    const handleBlur = () => {
+      keysDownRef.current.clear();
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
 
-    // Continuous movement loop
+    // Continuous 25ms movement interval
     const moveInterval = setInterval(() => {
-      if (isNewGameMenuOpen || isGameOver) return;
-
-      let dx = 0;
-      let dy = 0;
-      if (keysDown.has('w') || keysDown.has('arrowup')) dy -= 1;
-      if (keysDown.has('s') || keysDown.has('arrowdown')) dy += 1;
-      if (keysDown.has('a') || keysDown.has('arrowleft')) dx -= 1;
-      if (keysDown.has('d') || keysDown.has('arrowright')) dx += 1;
-
-      if (dx !== 0 || dy !== 0) {
-        const isRunning = keysDown.has('shift');
-        const isSneaking = keysDown.has('control');
-        moveSurvivor(dx, dy, isRunning, isSneaking);
-      }
-    }, 30);
+      triggerMovementStep();
+    }, 25);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
       clearInterval(moveInterval);
     };
-  }, [
-    cancelPlacement,
-    closeChest,
-    handleOpenNpc,
-    interactNearby,
-    interactSurvivor,
-    isGameOver,
-    isNearWorkbench,
-    isNewGameMenuOpen,
-    keyBindings,
-    moveSurvivor,
-    openChest,
-    repairNearby,
-    toggleFlashlight,
-  ]);
+  }, [triggerMovementStep]);
 
   const handleToggleMute = () => {
     const muted = soundManager.toggleMute();
@@ -348,7 +404,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-[10px] text-neutral-400 hidden md:block">
-                Tactical God-View Survival Simulator · Knox County Outbreak
+                Tactical God-View Survival Simulator · Charval County Outbreak
               </p>
             </div>
           </div>
@@ -449,7 +505,7 @@ export default function App() {
       {/* Main Website Body containing the Embedded Game Viewport & Informational Sections */}
       <main className="flex-1 flex flex-col">
         {/* 1. Embedded Game Section */}
-        <section id="game-viewport" className="w-full max-w-7xl mx-auto px-2 sm:px-4 lg:px-6 pt-3 pb-6">
+        <section id="game-viewport" className="w-full max-w-[1536px] mx-auto px-2 sm:px-4 lg:px-6 pt-3 pb-6">
           {!isFullscreen && (
             <div className="mb-2 flex flex-wrap items-center justify-between text-[11px] text-neutral-400 px-1 gap-2">
               <div className="flex items-center gap-2">
@@ -481,7 +537,7 @@ export default function App() {
             className={
               isFullscreen
                 ? 'fixed inset-0 w-screen h-screen z-50 flex flex-col bg-neutral-950 text-neutral-200 select-none relative font-mono overflow-hidden'
-                : 'w-full h-[760px] xl:h-[820px] flex flex-col bg-neutral-950 text-neutral-200 select-none relative font-mono overflow-hidden rounded-xl border-2 border-neutral-800 shadow-2xl ring-1 ring-cyan-500/20'
+                : 'w-full h-[780px] lg:h-[840px] xl:h-[890px] flex flex-col bg-neutral-950 text-neutral-200 select-none relative font-mono overflow-hidden rounded-xl border-2 border-neutral-800 shadow-2xl ring-1 ring-cyan-500/20'
             }
           >
             {/* CRT Scanline & Vignette Effect */}
@@ -510,81 +566,23 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Zone 2: Navigation Links */}
-              <nav className="hidden md:flex items-center gap-3 text-xs font-medium text-neutral-400">
-                {/* Hunger Rations Menu */}
-                <button
-                  onClick={() => setIsHungerMenuOpen(true)}
-                  className={`transition-colors hover:text-neutral-100 flex items-center gap-1 ${
-                    survivor.hunger < 20 ? 'text-red-400 font-bold animate-pulse' : 'text-amber-400'
-                  }`}
-                  title="Open Hunger & Food Rations Menu [U] (Full to empty in ~30 mins)"
-                >
-                  <Utensils className="w-3.5 h-3.5" />
-                  <span>Food [U] ({Math.round(survivor.hunger)}%)</span>
-                </button>
-
-                {/* Thirst Hydration Menu */}
-                <button
-                  onClick={() => setIsThirstMenuOpen(true)}
-                  className={`transition-colors hover:text-neutral-100 flex items-center gap-1 ${
-                    survivor.thirst < 20 ? 'text-red-400 font-bold animate-pulse' : 'text-cyan-400'
-                  }`}
-                  title="Open Thirst & Water Hydration Menu [Y] (Full to empty in ~10 mins)"
-                >
-                  <Droplets className="w-3.5 h-3.5" />
-                  <span>Water [Y] ({Math.round(survivor.thirst)}%)</span>
-                </button>
-
-                <button
-                  onClick={() => setIsBuildMenuOpen(true)}
-                  className="transition-colors hover:text-neutral-100 flex items-center gap-1 text-amber-300"
-                >
-                  <span>Build [B]</span>
-                </button>
-                <button
-                  onClick={() => setIsWorkbenchCraftOpen(true)}
-                  className={`transition-colors hover:text-neutral-100 flex items-center gap-1 ${
-                    isNearWorkbench ? 'text-cyan-400 font-semibold' : 'text-neutral-400'
-                  }`}
-                >
-                  <span>Bench [{keyBindings.workbench.toUpperCase()}]</span>
-                  {isNearWorkbench && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />}
-                </button>
-                <button
-                  onClick={() => setIsEquipmentOpen(true)}
-                  className="transition-colors hover:text-neutral-100 flex items-center gap-1 text-emerald-400"
-                >
-                  <Shield className="w-3.5 h-3.5" />
-                  <span>Rig [E]</span>
-                </button>
-                <button
-                  onClick={() => setIsInventoryOpen(true)}
-                  className="transition-colors hover:text-neutral-100"
-                >
-                  Pack [I]
-                </button>
-                <button
-                  onClick={() => setIsColonyOpen(true)}
-                  className="transition-colors hover:text-neutral-100 flex items-center gap-1 text-emerald-400 font-semibold"
-                  title="Colony Survivors & Base Maintenance [K]"
-                >
-                  <Users className="w-3.5 h-3.5" />
-                  <span>Colony ({npcs.filter((n) => n.state === 'recruited').length}) [K]</span>
-                </button>
+              {/* Zone 2: Navigation Links (food, water, build, bench, rig, pack, colony removed per instruction) */}
+              <nav className="flex items-center gap-2 text-xs font-medium text-neutral-400">
                 <button
                   onClick={() => setIsNewGameMenuOpen(true)}
-                  className="transition-colors hover:text-red-300 text-red-400/90 font-semibold flex items-center gap-1"
+                  className="transition-colors hover:text-red-300 text-red-400/90 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700"
                   title="Start or Restart New Game"
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>New</span>
+                  <RotateCcw className="w-3.5 h-3.5 text-red-400" />
+                  <span>New Game</span>
                 </button>
                 <button
                   onClick={() => setIsHelpOpen(true)}
-                  className="transition-colors hover:text-neutral-100"
+                  className="transition-colors hover:text-neutral-100 flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700"
+                  title="Open Tactical Survival Field Manual"
                 >
-                  Manual
+                  <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Manual</span>
                 </button>
               </nav>
 
@@ -599,14 +597,21 @@ export default function App() {
                   {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
                 </button>
 
-                {/* Satellite Scan */}
+                {/* Objectives Button (Pops tactical directive choices in and out) */}
                 <button
-                  onClick={() => requestOverseerNarration('Satellite emergency tactical sensor scan requested.')}
-                  disabled={isNarrating}
-                  className="px-2.5 py-1.5 text-xs font-semibold uppercase tracking-wider text-neutral-950 bg-cyan-400 hover:bg-cyan-300 disabled:opacity-50 rounded transition-colors whitespace-nowrap flex items-center gap-1 shadow"
+                  onClick={() => setIsObjectivesOpen((prev) => !prev)}
+                  className={`px-2.5 sm:px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-all whitespace-nowrap flex items-center gap-1.5 shadow ${
+                    isObjectivesOpen
+                      ? 'bg-amber-400 text-neutral-950 ring-2 ring-amber-300 font-black'
+                      : 'text-neutral-950 bg-cyan-400 hover:bg-cyan-300'
+                  }`}
+                  title="Toggle Tactical Objectives & Directive Choices"
                 >
-                  <Radio className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Scan</span>
+                  <Target className="w-3.5 h-3.5" />
+                  <span>Objectives</span>
+                  {availableActions.length > 0 && (
+                    <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse ml-0.5" />
+                  )}
                 </button>
 
                 {/* Dedicated Full Screen Button on Game Frame (Button click only; no quick key) */}
@@ -634,164 +639,205 @@ export default function App() {
               </div>
             </header>
 
-      {/* Main Body: Simulation Canvas on Left, Overseer Terminal on Right */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-        {/* Left: 64-bit Pixel Art Canvas Simulation with Zoom Controls */}
-        <div className="h-full relative overflow-hidden bg-neutral-950 flex-1">
-          <SimulationCanvas
-            survivor={survivor}
-            zombies={zombies}
-            npcs={npcs}
-            buildings={buildings}
-            structures={structures}
-            bloodSplats={bloodSplats}
-            fires={fires}
-            soundEvents={soundEvents}
-            noiseHeatmap={noiseHeatmap}
-            placementGhost={placementGhost}
-            environment={environment}
-            activePrompt={activePrompt}
-            animationEffects={animationEffects}
-            onPrimaryAction={handlePrimaryAction}
-            onCancelPlacement={cancelPlacement}
-            onCycleActiveSlot={cycleActiveSlot}
-            isThermalMode={isThermalMode}
-            onToggleThermal={() => setIsThermalMode((prev) => !prev)}
-            isHeatmapMode={isHeatmapMode}
-            onToggleHeatmap={() => setIsHeatmapMode((prev) => !prev)}
-            onToggleFlashlight={toggleFlashlight}
-          />
+            {/* Tactical Directive Choices Popover (Pops in and out right in this general area) */}
+            <TacticalObjectivesPopover
+              isOpen={isObjectivesOpen}
+              onClose={() => setIsObjectivesOpen(false)}
+              availableActions={availableActions}
+              onExecuteAction={executeTacticalAction}
+              onRefreshDirectives={() =>
+                requestOverseerNarration('Tactical re-evaluation of sector objectives requested.')
+              }
+              isNarrating={isNarrating}
+            />
 
-          {/* Mini-Map Radar (Points to Home, tracks zombies, survivors, and structures) */}
-          <MiniMap
-            survivor={survivor}
-            structures={structures}
-            zombies={zombies}
-            npcs={npcs}
-            buildings={buildings}
-            homeX={480}
-            homeY={360}
-          />
+            {/* Main Body: Vitals Panel on Left + Game Simulation Screen on Right */}
+            <div className="flex-1 w-full min-h-0 flex overflow-hidden relative">
+              {/* Top-Left Telemetry & Vitals Panel (Outside of player map) */}
+              <SurvivorVitalsPanel
+                survivor={survivor}
+                keyBindings={keyBindings}
+                onOpenEquipment={() => toggleRightTab('rig')}
+                onOpenHunger={() => toggleRightTab('food')}
+                onOpenThirst={() => toggleRightTab('water')}
+                onInteract={() => interactNearby(handleOpenWorkbench, openChest, () => setActiveRightTab('food'))}
+                hoveredQuickType={hoveredQuickType}
+                lowestFoodNutrition={lowestFood?.nutrition ?? 0}
+                lowestDrinkHydration={lowestDrink?.hydration ?? 0}
+              />
 
-          {/* Controls Quick Hint */}
-          <div className="absolute top-3 left-3 bg-neutral-950/90 border border-neutral-800/90 rounded px-2.5 py-1.5 text-[10px] text-neutral-300 space-y-0.5 backdrop-blur-xs pointer-events-none z-10 shadow-lg font-mono">
-            <div><strong className="text-neutral-100">WASD:</strong> Move · <strong className="text-neutral-100">Scroll:</strong> Hand Item · <strong className="text-cyan-400">[-] / [+]:</strong> Zoom View</div>
-            <div><strong className="text-amber-400">[{keyBindings.interact.toUpperCase()}]:</strong> Door / Loot / Tree / Fence Vault / Bed · <strong className="text-cyan-400">[{keyBindings.equipment.toUpperCase()}]:</strong> Equipment Rig</div>
-            <div><strong className="text-emerald-400">[{keyBindings.repair.toUpperCase()}]:</strong> Repair · <strong className="text-cyan-300">[{keyBindings.survivor.toUpperCase()}]:</strong> Survivor · <strong className="text-cyan-400">[{keyBindings.workbench.toUpperCase()}]:</strong> Workbench · <strong className="text-amber-300">[{keyBindings.build.toUpperCase()}]:</strong> Build</div>
-            <div><strong className="text-amber-400">[{keyBindings.hunger.toUpperCase()}]:</strong> Food · <strong className="text-cyan-400">[{keyBindings.thirst.toUpperCase()}]:</strong> Water · <strong className="text-emerald-400">[{keyBindings.colony.toUpperCase()}]:</strong> Colony · <strong className="text-neutral-300">[{keyBindings.flashlight.toUpperCase()}]:</strong> Flashlight</div>
-          </div>
+              {/* Simulation Screen Viewport */}
+              <div className="flex-1 h-full relative overflow-hidden bg-neutral-950">
+                <SimulationCanvas
+                  survivor={survivor}
+                  zombies={zombies}
+                  npcs={npcs}
+                  buildings={buildings}
+                  structures={structures}
+                  bloodSplats={bloodSplats}
+                  fires={fires}
+                  soundEvents={soundEvents}
+                  noiseHeatmap={noiseHeatmap}
+                  placementGhost={placementGhost}
+                  environment={environment}
+                  activePrompt={activePrompt}
+                  animationEffects={animationEffects}
+                  onPrimaryAction={(x, y) =>
+                    handlePrimaryAction(x, y, {
+                      onOpenWorkbench: () => setActiveRightTab('bench'),
+                      onOpenKitchen: () => setActiveRightTab('food'),
+                      onOpenChest: (chest) => openChest(chest),
+                    })
+                  }
+                  onCancelPlacement={cancelPlacement}
+                  onRotatePlacement={rotatePlacement}
+                  onCycleActiveSlot={cycleActiveSlot}
+                  isThermalMode={isThermalMode}
+                  onToggleThermal={() => setIsThermalMode((prev) => !prev)}
+                  isHeatmapMode={isHeatmapMode}
+                  onToggleHeatmap={() => setIsHeatmapMode((prev) => !prev)}
+                  onToggleFlashlight={toggleFlashlight}
+                  currentShelter={currentShelter}
+                  onSetAsBase={() => setAsHomeBase()}
+                />
 
-          {/* System Notification Toast */}
-          {systemMessage && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-neutral-900/95 border border-amber-600/70 text-amber-200 text-xs px-3.5 py-1.5 rounded shadow-lg animate-fade-in backdrop-blur-md flex items-center gap-2 z-30">
-              <Zap className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-              <span>{systemMessage}</span>
+                {/* Mini-Map Radar (Points to Home Base, tracks zombies, survivors, and structures) */}
+                <MiniMap
+                  survivor={survivor}
+                  structures={structures}
+                  zombies={zombies}
+                  npcs={npcs}
+                  buildings={buildings}
+                  homeX={homeBase.x}
+                  homeY={homeBase.y}
+                />
+
+                {/* System Notification Toast */}
+                {systemMessage && (
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-neutral-900/95 border border-amber-600/70 text-amber-200 text-xs px-3.5 py-1.5 rounded shadow-lg animate-fade-in backdrop-blur-md flex items-center gap-2 z-30">
+                    <Zap className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                    <span>{systemMessage}</span>
+                  </div>
+                )}
+
+                {/* Right Side Menu Tabs & Pop-out Menu Drawer */}
+                <RightTabsNav
+                  activeTab={activeRightTab}
+                  onToggleTab={toggleRightTab}
+                  onClose={() => setActiveRightTab(null)}
+                  survivor={survivor}
+                  isNearWorkbench={isNearWorkbench}
+                  recruitedCount={npcs.filter((n) => n.state === 'recruited').length}
+                  totalDefense={totalDefense}
+                  keyBindings={keyBindings}
+                >
+                  {activeRightTab === 'food' && (
+                    <HungerMenu
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      onEatFood={useItem}
+                      isNearStove={isNearStove}
+                    />
+                  )}
+                  {activeRightTab === 'water' && (
+                    <ThirstMenu
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      onDrinkWater={useItem}
+                      waterGridActive={environment.waterGrid}
+                      day={environment.day}
+                    />
+                  )}
+                  {activeRightTab === 'pack' && (
+                    <InventoryModal
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      onUseItem={useItem}
+                      onEquipWeapon={(item) => equipItem(item, 'weapon1')}
+                      onEquipTool={(item) => equipItem(item, 'tool')}
+                      onStartPlacing={(item) => {
+                        setActiveRightTab(null);
+                        startPlacingItem(item);
+                      }}
+                      onOpenEquipment={() => toggleRightTab('rig')}
+                    />
+                  )}
+                  {activeRightTab === 'build' && (
+                    <BuildMenu
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      onCraft={(recipe) => {
+                        if (recipe.resultItem?.isPlaceable) {
+                          // Drop menu away and start placing on map right away!
+                          setActiveRightTab(null);
+                          startPlacingItem(recipe.resultItem, recipe.id);
+                        } else {
+                          craftRecipe(recipe);
+                        }
+                      }}
+                    />
+                  )}
+                  {activeRightTab === 'bench' && (
+                    <WorkbenchCraftModal
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      isNearWorkbench={isNearWorkbench}
+                      onCraft={craftRecipe}
+                    />
+                  )}
+                  {activeRightTab === 'rig' && (
+                    <EquipmentModal
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      survivor={survivor}
+                      onEquipItem={equipItem}
+                      onUnequipItem={unequipItem}
+                      onSelectActiveSlot={handleSelectActiveSlot}
+                    />
+                  )}
+                  {activeRightTab === 'colony' && (
+                    <ColonyOverviewModal
+                      isOpen={true}
+                      asSidePanel={true}
+                      onClose={() => setActiveRightTab(null)}
+                      npcs={npcs}
+                      structures={structures}
+                      survivor={survivor}
+                      onSetTask={setNpcTask}
+                      onOpenTrade={handleOpenTrade}
+                      onRepairStructure={repairStructure}
+                      homeBase={homeBase}
+                      currentShelter={currentShelter}
+                      onSetAsBase={() => setAsHomeBase()}
+                    />
+                  )}
+                </RightTabsNav>
+              </div>
             </div>
-          )}
-        </div>
 
-        {/* Right: Overseer AI God-View Terminal */}
-        <div className="w-full lg:w-[480px] xl:w-[520px] h-full flex flex-col shrink-0 z-10 border-t lg:border-t-0 border-neutral-800">
-          <OverseerTerminal
-            activeLog={activeLog}
-            availableActions={availableActions}
-            isNarrating={isNarrating}
-            onExecuteAction={executeTacticalAction}
-            onRefreshNarration={() => requestOverseerNarration()}
-            isThermalMode={isThermalMode}
-            onToggleThermal={() => setIsThermalMode((prev) => !prev)}
-            noiseDb={Math.round(15 + (survivor.isRunning ? 30 : 0))}
-          />
-        </div>
-      </div>
-
-      {/* Bottom Survivor HUD */}
-      <SurvivorHUD
-        survivor={survivor}
-        isNearWorkbench={isNearWorkbench}
-        keyBindings={keyBindings}
-        onOpenBuild={() => setIsBuildMenuOpen(true)}
-        onOpenWorkbenchCraft={() => setIsWorkbenchCraftOpen(true)}
-        onOpenInventory={() => setIsInventoryOpen(true)}
-        onOpenEquipment={() => setIsEquipmentOpen(true)}
-        onOpenHunger={() => setIsHungerMenuOpen(true)}
-        onOpenThirst={() => setIsThirstMenuOpen(true)}
-        onOpenColony={() => setIsColonyOpen(true)}
-        recruitedCount={npcs.filter((n) => n.state === 'recruited').length}
-        onSelectActiveSlot={handleSelectActiveSlot}
-        onToggleFlashlight={toggleFlashlight}
-        onInteract={() => interactNearby(handleOpenWorkbench, openChest)}
-      />
-
-      {/* 1. Field Build Menu (Tools, Weapons, Walls, Sleeping Mat, Fire, Workbench) */}
-      <BuildMenu
-        isOpen={isBuildMenuOpen}
-        onClose={() => setIsBuildMenuOpen(false)}
-        survivor={survivor}
-        onCraft={craftRecipe}
-      />
-
-      {/* 2. Workbench Exclusive Crafting (Firearms, Spiked Bat, Wall Plating, Cot Beds, Stoves) */}
-      <WorkbenchCraftModal
-        isOpen={isWorkbenchCraftOpen}
-        onClose={() => setIsWorkbenchCraftOpen(false)}
-        survivor={survivor}
-        isNearWorkbench={isNearWorkbench}
-        onCraft={craftRecipe}
-      />
-
-      {/* 3. Dedicated Equipment & Armor Rig Screen */}
-      <EquipmentModal
-        isOpen={isEquipmentOpen}
-        onClose={() => setIsEquipmentOpen(false)}
-        survivor={survivor}
-        onEquipItem={equipItem}
-        onUnequipItem={unequipItem}
-        onSelectActiveSlot={handleSelectActiveSlot}
-      />
-
-      {/* 4. Backpack Inventory Modal (with Place Structure integration) */}
-      <InventoryModal
-        isOpen={isInventoryOpen}
-        onClose={() => setIsInventoryOpen(false)}
-        survivor={survivor}
-        onUseItem={useItem}
-        onEquipWeapon={(item) => equipItem(item, 'weapon1')}
-        onEquipTool={(item) => equipItem(item, 'tool')}
-        onStartPlacing={startPlacingItem}
-        onOpenEquipment={() => setIsEquipmentOpen(true)}
-      />
-
-      {/* 5. Separate Hunger & Caloric Reserves Menu */}
-      <HungerMenu
-        isOpen={isHungerMenuOpen}
-        onClose={() => setIsHungerMenuOpen(false)}
-        survivor={survivor}
-        onEatFood={useItem}
-        isNearStove={isNearStove}
-      />
-
-      {/* 6. Separate Thirst & Hydration Menu */}
-      <ThirstMenu
-        isOpen={isThirstMenuOpen}
-        onClose={() => setIsThirstMenuOpen(false)}
-        survivor={survivor}
-        onDrinkWater={useItem}
-        waterGridActive={environment.waterGrid}
-        day={environment.day}
-      />
-
-      {/* 7. Survivor Colony & Base Fortifications Overview */}
-      <ColonyOverviewModal
-        isOpen={isColonyOpen}
-        onClose={() => setIsColonyOpen(false)}
-        npcs={npcs}
-        structures={structures}
-        survivor={survivor}
-        onSetTask={setNpcTask}
-        onOpenTrade={handleOpenTrade}
-        onRepairStructure={repairStructure}
-      />
+            {/* Bottom Survivor Tactical Action Bar */}
+            <SurvivorHUD
+              survivor={survivor}
+              keyBindings={keyBindings}
+              onSelectActiveSlot={handleSelectActiveSlot}
+              onToggleFlashlight={toggleFlashlight}
+              lowestFood={lowestFood}
+              lowestDrink={lowestDrink}
+              onQuickEat={handleQuickEat}
+              onQuickDrink={handleQuickDrink}
+              onHoverQuickType={setHoveredQuickType}
+            />
 
       {/* 8. Stranded / Recruited NPC Interaction & Dialogue Modal */}
       <NpcInteractionModal
@@ -1001,7 +1047,7 @@ export default function App() {
                     </span>
                   </div>
                   <p className="text-[11px] text-neutral-400 leading-relaxed">
-                    Craft deployable wooden walls, campfires, sleeping mats, and workbenches anywhere in Knox County.
+                    Craft deployable wooden walls, campfires, sleeping mats, and workbenches anywhere in Charval County.
                   </p>
                 </div>
 
@@ -1111,7 +1157,7 @@ export default function App() {
               </h2>
               <div className="p-6 bg-gradient-to-r from-red-950/40 via-neutral-900/60 to-neutral-950 border border-red-900/60 rounded-xl space-y-3">
                 <p className="text-xs text-neutral-300 leading-relaxed">
-                  Every night that passes and every sunrise that breaks, the Knox County infected secretly mutate and adapt. Shamblers compound in speed and flesh density each dawn. If you pass out from exhaustion without sleeping safely in bed, the horde compounds even faster during that night.
+                  Every night that passes and every sunrise that breaks, the Charval County infected secretly mutate and adapt. Shamblers compound in speed and flesh density each dawn. If you pass out from exhaustion without sleeping safely in bed, the horde compounds even faster during that night.
                 </p>
                 <div className="pt-2 flex items-center gap-2 text-amber-400 text-xs font-semibold">
                   <span>🗣️</span>
@@ -1145,7 +1191,7 @@ export default function App() {
                     Allied Survivor Management [K]
                   </h3>
                   <p className="text-xs text-neutral-400 leading-relaxed">
-                    Rescue wanderers across Knox County. Arm them with pipe shotguns and crowbars, assign them to forage food or stand guard at your gates, and deposit surplus supplies into shared Colony Storage Chests.
+                    Rescue wanderers across Charval County. Arm them with pipe shotguns and crowbars, assign them to forage food or stand guard at your gates, and deposit surplus supplies into shared Colony Storage Chests.
                   </p>
                 </div>
               </div>
