@@ -1,0 +1,6 @@
+{
+  "name": "Zombie Survivor",
+  "description": "An intense tactical survival simulator where you fight, build, recruit survivors, and endure the evolving undead horde across day and night.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
