@@ -3569,11 +3569,31 @@ export function useSurvivalGame() {
             return;
           }
 
-          // Must be digging outside
-          if (isPointInsideBuilding(targetWorldX, targetWorldY, buildingsRef.current)) {
-            soundManager.playTerminalBlip();
-            setSystemMessage('⚠️ Cannot dig trenches indoors! Dig outside on open soil.');
-            return;
+          // Check if spot is indoors
+          const insideBldg = buildingsRef.current.find(
+            (b) =>
+              targetWorldX >= b.x &&
+              targetWorldX <= b.x + b.width &&
+              targetWorldY >= b.y &&
+              targetWorldY <= b.y + b.height
+          );
+          let isTearingFloor = false;
+          if (insideBldg) {
+            const bName = insideBldg.name.toLowerCase();
+            const isHardFloor =
+              bName.includes('clinic') ||
+              bName.includes('medical') ||
+              bName.includes('grocery') ||
+              bName.includes('hardware') ||
+              bName.includes('armory') ||
+              bName.includes('bank');
+            if (isHardFloor) {
+              soundManager.playTerminalBlip();
+              setSystemMessage('⚠️ Concrete/tile flooring cannot be dug with a shovel. Dig on wooden floors or open soil.');
+              return;
+            }
+            // Can tear up wooden timber floorboards in houses/cabins/safehouses!
+            isTearingFloor = true;
           }
 
           // Check if spot is already blocked by a solid building or tree
@@ -3600,7 +3620,7 @@ export function useSurvivalGame() {
             width: 32,
             height: 32,
             type: 'dirt_trench',
-            name: 'Dirt Trench',
+            name: isTearingFloor ? 'Torn Floor Trench' : 'Dirt Trench',
             hp: 100,
             maxHp: 100,
           };
@@ -3608,20 +3628,38 @@ export function useSurvivalGame() {
           setStructures((prev) => [...prev, newTrench]);
           setSurvivor((s) => {
             let inv = [...s.inventory];
-            const topsoilIdx = inv.findIndex(
-              (i) => i.id === 'inv_topsoil' || i.name.toLowerCase().includes('topsoil')
-            );
-            if (topsoilIdx !== -1) {
-              inv[topsoilIdx] = { ...inv[topsoilIdx], count: (inv[topsoilIdx].count ?? 1) + 1 };
+            if (isTearingFloor) {
+              const woodIdx = inv.findIndex(
+                (i) => i.id === 'inv_scrap_wood' || i.name.toLowerCase().includes('scrap wood')
+              );
+              if (woodIdx !== -1) {
+                inv[woodIdx] = { ...inv[woodIdx], count: (inv[woodIdx].count ?? 1) + 1 };
+              } else {
+                inv.push({
+                  id: 'inv_scrap_wood',
+                  name: 'Scrap Wood',
+                  category: 'resource',
+                  description: 'Salvaged wooden timber boards torn up from floorboards.',
+                  weight: 0.5,
+                  count: 1,
+                });
+              }
             } else {
-              inv.push({
-                id: 'inv_topsoil',
-                name: 'Topsoil',
-                category: 'resource',
-                description: 'Rich excavated topsoil gathered from digging defensive trenches.',
-                weight: 0.8,
-                count: 1,
-              });
+              const topsoilIdx = inv.findIndex(
+                (i) => i.id === 'inv_topsoil' || i.name.toLowerCase().includes('topsoil')
+              );
+              if (topsoilIdx !== -1) {
+                inv[topsoilIdx] = { ...inv[topsoilIdx], count: (inv[topsoilIdx].count ?? 1) + 1 };
+              } else {
+                inv.push({
+                  id: 'inv_topsoil',
+                  name: 'Topsoil',
+                  category: 'resource',
+                  description: 'Rich excavated topsoil gathered from digging defensive trenches.',
+                  weight: 0.8,
+                  count: 1,
+                });
+              }
             }
             return {
               ...s,
@@ -3650,12 +3688,16 @@ export function useSurvivalGame() {
             x: trenchX + 16,
             y: trenchY - 10,
             angle: 0,
-            text: '+1 TOPSOIL · TRENCH DUG (-25% SLOW)',
+            text: isTearingFloor ? '+1 SCRAP WOOD · FLOOR TORN UP' : '+1 TOPSOIL · TRENCH DUG (-25% SLOW)',
             color: '#f59e0b',
             durationMs: 1400,
           });
-          emitSound(trenchX, trenchY, 40, 16, 'Digging Dirt Trench');
-          setSystemMessage('Dug a dirt trench and collected 1 Topsoil! Zombies moving through this trench are slowed by 25%.');
+          emitSound(trenchX, trenchY, 40, 16, isTearingFloor ? 'Tearing Up Floorboards' : 'Digging Dirt Trench');
+          setSystemMessage(
+            isTearingFloor
+              ? '⛏️ Tore up wooden floorboards (+1 Scrap Wood) leaving an excavated trench.'
+              : '⛏️ Dug a defensive dirt trench (+1 Topsoil). Slows zombies passing through.'
+          );
           return;
         }
       }

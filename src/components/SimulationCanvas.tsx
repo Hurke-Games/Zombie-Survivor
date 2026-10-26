@@ -82,13 +82,41 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
   onSetAsBase,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [mousePos, setMousePos] = useState<{ x: number; y: number }>({ x: 480, y: 360 });
+  const mousePosRef = useRef<{ x: number; y: number }>({ x: 480, y: 360 });
   const [zoom, setZoom] = useState<number>(1.0); // Zoom level from 0.5x to 2.5x
 
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const survivorRef = useRef(survivor);
   survivorRef.current = survivor;
+  const zombiesRef = useRef(zombies);
+  zombiesRef.current = zombies;
+  const structuresRef = useRef(structures);
+  structuresRef.current = structures;
+  const bloodSplatsRef = useRef(bloodSplats);
+  bloodSplatsRef.current = bloodSplats;
+  const soundEventsRef = useRef(soundEvents);
+  soundEventsRef.current = soundEvents;
+  const noiseHeatmapRef = useRef(noiseHeatmap);
+  noiseHeatmapRef.current = noiseHeatmap;
+  const placementGhostRef = useRef(placementGhost);
+  placementGhostRef.current = placementGhost;
+  const environmentRef = useRef(environment);
+  environmentRef.current = environment;
+  const activePromptRef = useRef(activePrompt);
+  activePromptRef.current = activePrompt;
+  const animationEffectsRef = useRef(animationEffects);
+  animationEffectsRef.current = animationEffects;
+  const npcsRef = useRef(npcs);
+  npcsRef.current = npcs;
+  const buildingsRef = useRef(buildings);
+  buildingsRef.current = buildings;
+  const speechBubbleRef = useRef(speechBubble);
+  speechBubbleRef.current = speechBubble;
+  const isThermalModeRef = useRef(isThermalMode);
+  isThermalModeRef.current = isThermalMode;
+  const isHeatmapModeRef = useRef(isHeatmapMode);
+  isHeatmapModeRef.current = isHeatmapMode;
 
   // Zoom helpers
   const handleZoomIn = () => {
@@ -192,15 +220,18 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     }
   };
 
-  const [isHoveringInteractable, setIsHoveringInteractable] = useState<boolean>(false);
-
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { x, y } = screenToWorld(e.clientX, e.clientY);
-    setMousePos({ x, y });
+    mousePosRef.current = { x, y };
 
-    // Check if directly hovering over interactable NPC or structure
-    const overNpc = npcs.some((n) => Math.hypot(n.x - x, n.y - y) <= 22);
-    const overStructure = structures.some((s) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Check if directly hovering over interactable NPC or structure using current ref data
+    const currentNpcs = npcsRef.current;
+    const currentStructures = structuresRef.current;
+    const overNpc = currentNpcs.some((n) => Math.hypot(n.x - x, n.y - y) <= 22);
+    const overStructure = currentStructures.some((s) => {
       const isInteractable =
         s.type === 'door_wood' ||
         s.type === 'door_stone' ||
@@ -230,10 +261,10 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
       );
     });
 
-    setIsHoveringInteractable(overNpc || overStructure);
+    canvas.style.cursor = overNpc || overStructure ? 'pointer' : 'crosshair';
   };
 
-  // Main canvas render loop
+  // Main canvas render loop - decoupled from React state for 60 FPS performance
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -247,6 +278,25 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
       const height = canvas.height;
       const now = Date.now();
 
+      // Read current state from refs - fully decoupled from React re-renders for steady 60 FPS
+      const survivor = survivorRef.current;
+      const allZombies = zombiesRef.current;
+      const allNpcs = npcsRef.current;
+      const allStructures = structuresRef.current;
+      const allBuildings = buildingsRef.current;
+      const allBloodSplats = bloodSplatsRef.current;
+      const allSoundEvents = soundEventsRef.current;
+      const noiseHeatmap = noiseHeatmapRef.current;
+      const placementGhost = placementGhostRef.current;
+      const environment = environmentRef.current;
+      const activePrompt = activePromptRef.current;
+      const animationEffects = animationEffectsRef.current;
+      const speechBubble = speechBubbleRef.current;
+      const isThermalMode = isThermalModeRef.current;
+      const isHeatmapMode = isHeatmapModeRef.current;
+      const zoom = zoomRef.current;
+      const mousePos = mousePosRef.current;
+
       // Clear letterbox background
       ctx.fillStyle = '#0a0d0f';
       ctx.fillRect(0, 0, width, height);
@@ -258,17 +308,58 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
       ctx.scale(zoom, zoom);
       ctx.translate(-camX, -camY);
 
+      // 5x5 Sector Boundary Calculation:
+      // Player's sector + 8 surrounding (radius 1) + 16 surrounding that (radius 2)
+      // Sector size is 800px x 800px
+      const playerSecX = Math.floor(survivor.x / 800);
+      const playerSecY = Math.floor(survivor.y / 800);
+      const minSecX = playerSecX - 2;
+      const maxSecX = playerSecX + 2;
+      const minSecY = playerSecY - 2;
+      const maxSecY = playerSecY + 2;
+
+      const minWorldX = minSecX * 800;
+      const maxWorldX = (maxSecX + 1) * 800;
+      const minWorldY = minSecY * 800;
+      const maxWorldY = (maxSecY + 1) * 800;
+
+      // Filter visible entities strictly within the 5x5 sector zone (+ margin for smooth edges)
+      // Preserves all structures (including shovel dirt_trench excavations) within the 5x5 sector
+      const buildings = allBuildings.filter(
+        (b) => b.x + b.width >= minWorldX && b.x <= maxWorldX && b.y + b.height >= minWorldY && b.y <= maxWorldY
+      );
+      const structures = allStructures.filter(
+        (s) => s.x + s.width >= minWorldX && s.x <= maxWorldX && s.y + s.height >= minWorldY && s.y <= maxWorldY
+      );
+      const bloodSplats = allBloodSplats.filter(
+        (splat) => splat.x >= minWorldX && splat.x <= maxWorldX && splat.y >= minWorldY && splat.y <= maxWorldY
+      );
+      const zombies = allZombies.filter(
+        (z) => z.x >= minWorldX - 60 && z.x <= maxWorldX + 60 && z.y >= minWorldY - 60 && z.y <= maxWorldY + 60
+      );
+      const npcs = allNpcs.filter(
+        (n) => n.x >= minWorldX - 60 && n.x <= maxWorldX + 60 && n.y >= minWorldY - 60 && n.y <= maxWorldY + 60
+      );
+      const soundEvents = allSoundEvents.filter(
+        (snd) => snd.x >= minWorldX - 100 && snd.x <= maxWorldX + 100 && snd.y >= minWorldY - 100 && snd.y <= maxWorldY + 100
+      );
+
       // Day/Night Cycle calculation for environment visual state
       const dayNight = getDayNightInfo(environment.cycleSeconds ?? 360);
       const isDaytime = dayNight.isDay;
 
-      // 1. Terrain Background: Draw visible procedural sectors with clear daylight grass and road
+      // 1. Terrain Background: Draw visible procedural sectors within camera AND 5x5 sector zone
       const halfW = (width / 2) / zoom;
       const halfH = (height / 2) / zoom;
-      const minChunkX = Math.floor((camX - halfW) / 800) - 1;
-      const maxChunkX = Math.floor((camX + halfW) / 800) + 1;
-      const minChunkY = Math.floor((camY - halfH) / 800) - 1;
-      const maxChunkY = Math.floor((camY + halfH) / 800) + 1;
+      const camMinChunkX = Math.floor((camX - halfW) / 800) - 1;
+      const camMaxChunkX = Math.floor((camX + halfW) / 800) + 1;
+      const camMinChunkY = Math.floor((camY - halfH) / 800) - 1;
+      const camMaxChunkY = Math.floor((camY + halfH) / 800) + 1;
+
+      const minChunkX = Math.max(minSecX, camMinChunkX);
+      const maxChunkX = Math.min(maxSecX, camMaxChunkX);
+      const minChunkY = Math.max(minSecY, camMinChunkY);
+      const maxChunkY = Math.min(maxSecY, camMaxChunkY);
 
       for (let cx = minChunkX; cx <= maxChunkX; cx++) {
         for (let cy = minChunkY; cy <= maxChunkY; cy++) {
@@ -307,22 +398,24 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         }
       }
 
-      // Base Sector 4B Road (around origin 0..960): Clear daylight asphalt vs night road
-      ctx.fillStyle = isThermalMode ? '#10171d' : isDaytime ? '#47515d' : '#192026';
-      ctx.fillRect(0, 0, 960, 120);
-      ctx.fillRect(0, 600 - 90, 960, 90);
+      // Base Sector 4B Road (around origin 0..960): Only draw if sector [0, 0] is in our 5x5 zone
+      if (0 >= minSecX && 0 <= maxSecX && 0 >= minSecY && 0 <= maxSecY) {
+        ctx.fillStyle = isThermalMode ? '#10171d' : isDaytime ? '#47515d' : '#192026';
+        ctx.fillRect(0, 0, 960, 120);
+        ctx.fillRect(0, 600 - 90, 960, 90);
 
-      // Road dash lines
-      ctx.strokeStyle = isThermalMode ? '#2a3a48' : isDaytime ? '#facc15' : '#474c3e';
-      ctx.lineWidth = 3;
-      ctx.setLineDash([16, 16]);
-      ctx.beginPath();
-      ctx.moveTo(0, 60);
-      ctx.lineTo(960, 60);
-      ctx.moveTo(0, 600 - 45);
-      ctx.lineTo(960, 600 - 45);
-      ctx.stroke();
-      ctx.setLineDash([]);
+        // Road dash lines
+        ctx.strokeStyle = isThermalMode ? '#2a3a48' : isDaytime ? '#facc15' : '#474c3e';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([16, 16]);
+        ctx.beginPath();
+        ctx.moveTo(0, 60);
+        ctx.lineTo(960, 60);
+        ctx.moveTo(0, 600 - 45);
+        ctx.lineTo(960, 600 - 45);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       // 1b. Procedural Buildings & Interiors: Render floors for all buildings in world
       buildings.forEach((b) => {
@@ -2567,26 +2660,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     render();
 
     return () => cancelAnimationFrame(animId);
-  }, [
-    survivor,
-    zombies,
-    npcs,
-    structures,
-    bloodSplats,
-    soundEvents,
-    noiseHeatmap,
-    placementGhost,
-    environment,
-    activePrompt,
-    animationEffects,
-    mousePos,
-    isThermalMode,
-    isHeatmapMode,
-    zoom,
-    buildings,
-    speechBubble,
-    getCameraOffset,
-  ]);
+  }, [getCameraOffset]);
 
   return (
     <div className="relative w-full h-full flex items-center justify-center bg-neutral-950 overflow-hidden select-none">
@@ -2598,9 +2672,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         onContextMenu={handleContextMenu}
         onWheel={handleWheel}
         onMouseMove={handleMouseMove}
-        className={`w-full h-full object-contain border border-neutral-800 ${
-          isHoveringInteractable ? 'cursor-pointer' : 'cursor-crosshair'
-        }`}
+        className="w-full h-full object-contain border border-neutral-800 cursor-crosshair"
       />
 
       {/* Canvas Top Bar Controls & Mode Toggles */}
