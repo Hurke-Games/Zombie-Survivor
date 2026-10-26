@@ -82,25 +82,14 @@ export const SurvivorHUD: React.FC<SurvivorHUDProps> = ({
             </div>
           </button>
 
-          {/* Tool 1 */}
-          <button
-            type="button"
-            onClick={() => onSelectActiveSlot('tool')}
-            title="Tool 1: Field Tool (Click or Scroll Wheel to hold)"
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded border cursor-pointer transition-all ${
-              survivor.activeSlot === 'tool'
-                ? 'bg-sky-950/80 border-sky-500 text-sky-200 shadow-sm ring-1 ring-sky-500/50'
-                : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200'
-            }`}
+          {/* Tools Auto-Ready Status (Crafted tools work automatically upon interaction) */}
+          <div
+            title="All crafted tools work immediately when interacting with world nodes without manual slot selection"
+            className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded bg-neutral-900 border border-neutral-800 text-[10px] text-neutral-400 select-none"
           >
-            <Hammer className="w-3.5 h-3.5 text-sky-400" />
-            <div className="flex flex-col text-left">
-              <span className="text-[9px] uppercase font-bold text-sky-400/90 leading-tight">T1: Tool</span>
-              <span className="text-xs font-medium text-neutral-200 truncate max-w-[85px]">
-                {survivor.equippedTool?.name || 'None'}
-              </span>
-            </div>
-          </button>
+            <Hammer className="w-3 h-3 text-sky-400/80" />
+            <span className="font-semibold text-neutral-400">Tools: Auto-Ready</span>
+          </div>
         </div>
 
         {/* Center: Quick Eat & Quick Drink (Auto consumes lowest restoring item; hover previews on bars) */}

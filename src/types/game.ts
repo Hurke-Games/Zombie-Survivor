@@ -171,10 +171,26 @@ export type StructureType =
   | 'wall_wood'
   | 'wall_wood_crude'
   | 'wall_wood_reinforced'
+  | 'wall_brick'
+  | 'wall_stone'
+  | 'wall_steel'
+  | 'wall_concrete'
+  | 'door_wood'
+  | 'door_stone'
+  | 'door_steel'
   | 'fence_wood'
   | 'fence_wire'
   | 'barricade_window'
-  | 'door_wood'
+  | 'trap_clay_pit'
+  | 'trap_barbed_wire'
+  | 'trap_acid_pit'
+  | 'trap_shredder'
+  | 'abandoned_car'
+  | 'riverbed_clay'
+  | 'utility_pole'
+  | 'home_foundation'
+  | 'bank_vault'
+  | 'boulder_rock'
   | 'sleeping_mat'
   | 'bed'
   | 'kitchen_stove'
@@ -185,7 +201,16 @@ export type StructureType =
   | 'tree'
   | 'fruit_bush'
   | 'campfire'
-  | 'rain_collector';
+  | 'rain_collector'
+  | 'dirt_trench'
+  | 'ground_scrap_wood'
+  | 'tv_set';
+
+export interface SpeechBubble {
+  text: string;
+  expiresAt: number;
+  speaker?: string;
+}
 
 export interface WorldStructure {
   id: string;
@@ -210,6 +235,7 @@ export interface WorldStructure {
   fruitType?: string;
   chunkKey?: string;
   dismantleHits?: number; // Hammer demolition clicks (takes 5 to tear down)
+  workbenchTier?: number; // 1 = basic, 2 = advanced, 3 = max industrial machinist
 }
 
 export interface HomeBase {
@@ -426,4 +452,39 @@ export interface VisualAnimationEffect {
   range?: number;
   text?: string;
   color?: string;
+}
+
+export interface SaveSlotData {
+  slotId: number; // 1, 2, 3
+  savedAt: number;
+  day: number;
+  timeFormatted: string;
+  timeMinutes: number;
+  weather: string;
+  survivorName: string;
+  survivorHp: number;
+  survivorHunger: number;
+  survivorThirst: number;
+  survivorFatigue: number;
+  homeBaseName: string;
+  survivor: Survivor;
+  environment: EnvironmentState;
+  zombies: Zombie[];
+  structures: WorldStructure[];
+  homeBase: HomeBase;
+  npcs: NpcSurvivor[];
+  buildings: BuildingBounds[];
+  chunks: Record<string, WorldChunk>;
+  bloodSplats: BloodSplat[];
+  zombieMultipliers: {
+    speedMult: number;
+    healthMult: number;
+    damageMult: number;
+    spawnRateMult: number;
+    sightMult: number;
+    hearingMult: number;
+    smellMult: number;
+    populationMult: number;
+  };
+  highScoreDays: number;
 }

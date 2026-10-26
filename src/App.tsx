@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useSurvivalGame } from './hooks/useSurvivalGame';
+import { useSurvivalGame, getRainChance } from './hooks/useSurvivalGame';
 import { SimulationCanvas } from './components/SimulationCanvas';
 import { SurvivorHUD } from './components/SurvivorHUD';
 import { SurvivorVitalsPanel } from './components/SurvivorVitalsPanel';
@@ -18,9 +18,13 @@ import { NpcTradeModal } from './components/NpcTradeModal';
 import { MiniMap } from './components/MiniMap';
 import { StorageChestModal } from './components/StorageChestModal';
 import { SleepBlackoutOverlay } from './components/SleepBlackoutOverlay';
+import { SaveLoadModal } from './components/SaveLoadModal';
+import { IntroTvCutscene } from './components/IntroTvCutscene';
 import { KeyBindings, loadKeyBindings, saveKeyBindings } from './utils/keybindings';
 import { soundManager } from './utils/audio';
 import {
+  Save,
+  FolderOpen,
   Volume2,
   VolumeX,
   Radio,
@@ -79,6 +83,7 @@ export default function App() {
     resetNewGame,
     moveSurvivor,
     handlePrimaryAction,
+    handleSecondaryAction,
     cycleActiveSlot,
     equipItem,
     unequipItem,
@@ -106,6 +111,10 @@ export default function App() {
     repairNearby,
     interactSurvivor,
     highScoreDays,
+    saveSlots,
+    saveGameSlot,
+    loadGameSlot,
+    deleteGameSlot,
     activeChest,
     openChest,
     closeChest,
@@ -114,7 +123,12 @@ export default function App() {
     homeBase,
     currentShelter,
     setAsHomeBase,
+    speechBubble,
+    triggerSurvivorSpeech,
   } = useSurvivalGame();
+
+  const [isIntroCutsceneActive, setIsIntroCutsceneActive] = useState<boolean>(false);
+  const [isSaveLoadOpen, setIsSaveLoadOpen] = useState<boolean>(false);
 
   const [keyBindings, setKeyBindings] = useState<KeyBindings>(() => loadKeyBindings());
 
@@ -230,6 +244,16 @@ export default function App() {
     setIsNpcModalOpen(false);
     setIsTradeModalOpen(false);
     setIsHelpOpen(false);
+    setIsIntroCutsceneActive(true);
+  };
+
+  const handleCompleteIntroCutscene = () => {
+    setIsIntroCutsceneActive(false);
+    // User request: "Once we load in the house have him say in a speak bubble. I better get some supplies. My neighbor three blocks west had some tools. . .I wonder if he is okay. . ."
+    triggerSurvivorSpeech(
+      "I better get some supplies. My neighbor three blocks west had some tools. . .I wonder if he is okay. . .",
+      14000
+    );
   };
 
   // Persistent pressed keys ref (survives state updates without key loss or choppiness)
@@ -464,32 +488,8 @@ export default function App() {
             </a>
           </nav>
 
-          {/* Website Quick Actions & Fullscreen Button */}
+          {/* Website Header Fullscreen Action */}
           <div className="flex items-center gap-2">
-            <div
-              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-amber-950/40 border border-amber-600/60 rounded text-xs text-amber-300 font-semibold"
-              title="High Score: Longest Days Survived Record"
-            >
-              <span>🏆</span>
-              <span>Record: {highScoreDays}d</span>
-            </div>
-
-            <button
-              onClick={handleToggleMute}
-              title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-              className="p-1.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
-            >
-              {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-            </button>
-
-            <button
-              onClick={() => setIsHelpOpen(true)}
-              className="px-2.5 py-1.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white text-xs font-semibold transition-colors"
-            >
-              Manual
-            </button>
-
-            {/* Header Fullscreen Button (Button click only; no quick key) */}
             <button
               onClick={handleToggleFullscreen}
               title="Enter Full Screen Mode (Click button to toggle; no quick key)"
@@ -506,30 +506,6 @@ export default function App() {
       <main className="flex-1 flex flex-col">
         {/* 1. Embedded Game Section */}
         <section id="game-viewport" className="w-full max-w-[1536px] mx-auto px-2 sm:px-4 lg:px-6 pt-3 pb-6">
-          {!isFullscreen && (
-            <div className="mb-2 flex flex-wrap items-center justify-between text-[11px] text-neutral-400 px-1 gap-2">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="font-bold text-neutral-200 uppercase tracking-wider">
-                  EMBEDDED SIMULATION // SECTOR 4
-                </span>
-                <span className="text-neutral-600">|</span>
-                <span className="hidden sm:inline">Use Mouse to Aim/Attack · Scroll Wheel for Holster Slots</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="hidden md:inline text-neutral-500 text-[10px]">
-                  Click button to play in full screen
-                </span>
-                <button
-                  onClick={handleToggleFullscreen}
-                  className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 font-bold transition-colors text-xs"
-                >
-                  <Maximize className="w-3.5 h-3.5" />
-                  <span>Full Screen</span>
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* Embedded Game Screen Container Frame */}
           <div
@@ -563,11 +539,39 @@ export default function App() {
                   <span className={environment.isDay ? 'text-amber-400 font-semibold' : 'text-indigo-400 font-semibold'}>
                     {environment.isDay ? '☀️ DAY' : '🌙 NIGHT'} ({environment.cycleRemainingMinutes ?? 35}m)
                   </span>
+                  <span className="text-neutral-500">|</span>
+                  <span
+                    className={
+                      environment.weather.includes('Rain') || environment.weather === 'Thunderstorm'
+                        ? 'text-cyan-400 font-semibold flex items-center gap-1'
+                        : 'text-neutral-400 flex items-center gap-1'
+                    }
+                    title={`Weather: ${environment.weather} (Rain Probability: ${Math.round(getRainChance(environment.day) * 100)}%)`}
+                  >
+                    <span>{environment.weather === 'Thunderstorm' ? '⛈️' : environment.weather.includes('Rain') ? '🌧️' : environment.weather === 'Fog' ? '🌫️' : environment.weather === 'Overcast' ? '☁️' : '☀️'}</span>
+                    <span>{environment.weather} ({Math.round(getRainChance(environment.day) * 100)}% rain)</span>
+                  </span>
                 </span>
               </div>
 
-              {/* Zone 2: Navigation Links (food, water, build, bench, rig, pack, colony removed per instruction) */}
+              {/* Zone 2: Navigation Links (Saves, TV Broadcast, New Game, Manual) */}
               <nav className="flex items-center gap-2 text-xs font-medium text-neutral-400">
+                <button
+                  onClick={() => setIsIntroCutsceneActive(true)}
+                  className="transition-colors hover:text-cyan-300 text-cyan-400/90 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700 font-mono"
+                  title="Watch Zombie Outbreak Emergency Television Broadcast"
+                >
+                  <Radio className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>TV Alert</span>
+                </button>
+                <button
+                  onClick={() => setIsSaveLoadOpen(true)}
+                  className="transition-colors hover:text-amber-300 text-amber-400/90 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700 font-mono"
+                  title="Save or Load Game Progression (3 Slots)"
+                >
+                  <Save className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Saves</span>
+                </button>
                 <button
                   onClick={() => setIsNewGameMenuOpen(true)}
                   className="transition-colors hover:text-red-300 text-red-400/90 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-neutral-900 border border-neutral-800 hover:border-neutral-700"
@@ -682,11 +686,13 @@ export default function App() {
                   environment={environment}
                   activePrompt={activePrompt}
                   animationEffects={animationEffects}
-                  onPrimaryAction={(x, y) =>
-                    handlePrimaryAction(x, y, {
+                  onPrimaryAction={(x, y) => handlePrimaryAction(x, y)}
+                  onSecondaryAction={(x, y) =>
+                    handleSecondaryAction(x, y, {
                       onOpenWorkbench: () => setActiveRightTab('bench'),
                       onOpenKitchen: () => setActiveRightTab('food'),
                       onOpenChest: (chest) => openChest(chest),
+                      onOpenNpc: (npc) => handleOpenNpc(npc),
                     })
                   }
                   onCancelPlacement={cancelPlacement}
@@ -699,7 +705,30 @@ export default function App() {
                   onToggleFlashlight={toggleFlashlight}
                   currentShelter={currentShelter}
                   onSetAsBase={() => setAsHomeBase()}
+                  speechBubble={speechBubble}
                 />
+
+                {/* Survivor Cinematic Dialogue Subtitle Banner */}
+                {speechBubble && (
+                  <div className="absolute bottom-6 left-1/2 -translate-x-1/2 max-w-xl w-[90%] z-30 pointer-events-none animate-fade-in">
+                    <div className="px-4 py-3 rounded-lg bg-neutral-950/92 border border-amber-500/70 shadow-2xl backdrop-blur-md flex items-start gap-3">
+                      <div className="w-8 h-8 rounded bg-amber-500/20 border border-amber-500/50 flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold text-amber-300 font-mono">
+                        JM
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-[10px] uppercase font-bold tracking-wider text-amber-400 font-mono">
+                            {speechBubble.speaker || 'James Miller'}
+                          </span>
+                          <span className="text-[9px] text-neutral-500 font-mono">· THOUGHT</span>
+                        </div>
+                        <p className="text-xs text-neutral-100 font-mono italic leading-relaxed">
+                          &ldquo;{speechBubble.text}&rdquo;
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Mini-Map Radar (Points to Home Base, tracks zombies, survivors, and structures) */}
                 <MiniMap
@@ -870,6 +899,11 @@ export default function App() {
         onTakeItem={takeItemFromChest}
       />
 
+      {/* Retro 90s Television Outbreak Intro Cutscene */}
+      {isIntroCutsceneActive && (
+        <IntroTvCutscene onComplete={handleCompleteIntroCutscene} />
+      )}
+
       {/* 11. New Game / Start Game & Game Over Menu */}
       <NewGameMenu
         isOpen={isNewGameMenuOpen || isGameOver}
@@ -881,8 +915,21 @@ export default function App() {
         keyBindings={keyBindings}
         onUpdateKeyBindings={handleUpdateKeyBindings}
         onStartNewGame={handleStartNewGame}
+        onOpenSaves={() => setIsSaveLoadOpen(true)}
         onCancel={() => setIsNewGameMenuOpen(false)}
         canCancel={!isGameOver}
+      />
+
+      {/* 12. Browser 3-Slot Save Game System */}
+      <SaveLoadModal
+        isOpen={isSaveLoadOpen}
+        onClose={() => setIsSaveLoadOpen(false)}
+        saveSlots={saveSlots}
+        onSaveSlot={saveGameSlot}
+        onLoadSlot={loadGameSlot}
+        onDeleteSlot={deleteGameSlot}
+        currentDay={environment.day}
+        currentTimeFormatted={timeFormatted}
       />
 
       {/* Field Guide Help Modal */}
@@ -912,7 +959,7 @@ export default function App() {
                 <br />• <strong>Health (HP):</strong> HP only goes down from sustained physical damage (zombie strikes, bites, bleeding). Reaching 0% is fatal.
               </p>
               <p>
-                <strong className="text-emerald-400">2. Sleeping & Stamina Recovery:</strong> Stamina naturally regenerates when standing still or walking. Interact <strong className="text-neutral-100">[F]</strong> with a cot bed or sleeping mat to sleep through the night, clearing fatigue, panic, and waking at daybreak! If you stay awake past exhaustion, consciousness slips with 5 minutes to find a bed before collapsing.
+                <strong className="text-emerald-400">2. Sleeping & Stamina Recovery:</strong> Stamina naturally regenerates when standing still or walking. Interact <strong className="text-neutral-100">[F]</strong> with a cot bed or sleeping mat to sleep through the night (requires at least 50% fatigue; if rested, James will say &ldquo;I am not tired&rdquo;), clearing fatigue, panic, and waking at daybreak! If you stay awake past exhaustion, consciousness slips with 5 minutes to find a bed before collapsing.
               </p>
               <p>
                 <strong className="text-amber-400">3. Field Build vs Workbench Crafting:</strong>
@@ -1021,7 +1068,7 @@ export default function App() {
                     </span>
                   </div>
                   <p className="text-[11px] text-neutral-400 leading-relaxed">
-                    Dedicated repair action for zombie-damaged timber walls, doors, and wire barricades using wood planks & nails.
+                    Dedicated repair action for zombie-damaged timber walls, doors, and wire barricades using simple wood planks & nails.
                   </p>
                 </div>
 
@@ -1087,8 +1134,8 @@ export default function App() {
                   <span className="text-neutral-400">Hold <strong className="text-neutral-200">Shift</strong> to Sprint · Hold <strong className="text-neutral-200">Ctrl</strong> to Sneak</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-neutral-200">Combat & Holsters:</span>
-                  <span className="text-neutral-400"><strong className="text-neutral-200">Left Click:</strong> Attack/Shoot/Block · <strong className="text-neutral-200">Scroll Wheel:</strong> Cycle W1/W2/Tool</span>
+                  <span className="font-bold text-neutral-200">Combat & Interaction:</span>
+                  <span className="text-neutral-400"><strong className="text-red-400">Left Click:</strong> Attack Only · <strong className="text-cyan-400">Right Click:</strong> Loot / Doors / Workbench / Tear Down · <strong className="text-neutral-200">Scroll:</strong> Cycle Hand Items</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="font-bold text-neutral-200">Tactical Zoom:</span>

@@ -39,7 +39,9 @@ interface SimulationCanvasProps {
   animationEffects: VisualAnimationEffect[];
   npcs?: NpcSurvivor[];
   buildings?: import('../types/game').BuildingBounds[];
+  speechBubble?: import('../types/game').SpeechBubble | null;
   onPrimaryAction: (x: number, y: number) => void;
+  onSecondaryAction?: (x: number, y: number) => void;
   onCancelPlacement: () => void;
   onRotatePlacement?: () => void;
   onCycleActiveSlot: (delta: number) => void;
@@ -65,7 +67,9 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
   animationEffects,
   npcs = [],
   buildings = [],
+  speechBubble = null,
   onPrimaryAction,
+  onSecondaryAction,
   onCancelPlacement,
   onRotatePlacement,
   onCycleActiveSlot,
@@ -160,12 +164,15 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     onPrimaryAction(x, y);
   };
 
-  // Right-click cancels placement
+  // Right-click: cancels placement if placing, otherwise triggers secondary action (looting, workbench, kitchen, doors, dismantling)
   const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (placementGhost) {
       onCancelPlacement();
+      return;
     }
+    const { x, y } = screenToWorld(e.clientX, e.clientY);
+    onSecondaryAction?.(x, y);
   };
 
   // Scroll wheel: Ctrl+Wheel zooms in/out, placementGhost active rotates 90 degrees, normal Wheel cycles Hand slots (W1, W2, Tool)
@@ -185,9 +192,45 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     }
   };
 
+  const [isHoveringInteractable, setIsHoveringInteractable] = useState<boolean>(false);
+
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { x, y } = screenToWorld(e.clientX, e.clientY);
     setMousePos({ x, y });
+
+    // Check if directly hovering over interactable NPC or structure
+    const overNpc = npcs.some((n) => Math.hypot(n.x - x, n.y - y) <= 22);
+    const overStructure = structures.some((s) => {
+      const isInteractable =
+        s.type === 'door_wood' ||
+        s.type === 'door_stone' ||
+        s.type === 'door_steel' ||
+        s.type === 'abandoned_car' ||
+        s.type === 'riverbed_clay' ||
+        s.type === 'wall_brick' ||
+        s.type === 'utility_pole' ||
+        s.type === 'home_foundation' ||
+        s.type === 'bank_vault' ||
+        s.type === 'boulder_rock' ||
+        s.type === 'ground_scrap_wood' ||
+        s.type === 'loot_container' ||
+        s.type === 'workbench' ||
+        s.type === 'kitchen_stove' ||
+        s.type === 'campfire' ||
+        s.type === 'bed' ||
+        s.type === 'sleeping_mat' ||
+        s.type === 'rain_collector' ||
+        (s.type === 'fruit_bush' && (s.fruitCount ?? 0) > 0);
+      if (!isInteractable) return false;
+      return (
+        x >= s.x - 5 &&
+        x <= s.x + s.width + 5 &&
+        y >= s.y - 5 &&
+        y <= s.y + s.height + 5
+      );
+    });
+
+    setIsHoveringInteractable(overNpc || overStructure);
   };
 
   // Main canvas render loop
@@ -642,8 +685,37 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
           ctx.textAlign = 'center';
           ctx.fillText(`${s.waterStored || 0}/50`, bx, by + br + 8);
         } else if (s.type === 'loot_container') {
+          const isToolBox = s.name.toLowerCase().includes('tool box') || s.name.toLowerCase().includes('toolbox');
           const isChest = s.name.toLowerCase().includes('chest');
-          if (isChest) {
+          if (isToolBox) {
+            // Heavy Red Steel Mechanic's Tool Box
+            ctx.fillStyle = isThermalMode ? '#3f5060' : '#b91c1c';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            ctx.strokeStyle = '#7f1d1d';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+            // Lid bevel & top latch line
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(s.x + 2, s.y + 2, s.width - 4, 4);
+
+            // Metal top handle
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(s.x + s.width / 2 - 6, s.y - 2, 12, 3);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(s.x + s.width / 2 - 4, s.y - 3, 8, 2);
+
+            // Dual chrome clasps
+            ctx.fillStyle = '#e2e8f0';
+            ctx.fillRect(s.x + 4, s.y + 4, 3, 5);
+            ctx.fillRect(s.x + s.width - 7, s.y + 4, 3, 5);
+
+            // "TOOLS" stencil label
+            ctx.font = 'bold 7px monospace';
+            ctx.fillStyle = '#fde047';
+            ctx.textAlign = 'center';
+            ctx.fillText('TOOL BOX', s.x + s.width / 2, s.y + s.height - 3);
+          } else if (isChest) {
             // Wood storage chest with brass corner brackets
             ctx.fillStyle = isThermalMode ? '#3c5364' : '#78350f';
             ctx.fillRect(s.x, s.y, s.width, s.height);
@@ -672,6 +744,111 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
             ctx.fillStyle = '#e2e8f0';
             ctx.fillRect(s.x + s.width / 2 - 2, s.y + s.height / 2 - 1, 4, 3);
           }
+        } else if (s.type === 'ground_scrap_wood') {
+          // Weathered scrap wood timber boards lying on the ground (harvestable resource)
+          ctx.save();
+          const cx = s.x + s.width / 2;
+          const cy = s.y + s.height / 2;
+          ctx.translate(cx, cy);
+
+          // Subtle glowing ground ring indicator for pickup visibility
+          const pulse = (Math.sin(now * 0.005) + 1) * 0.5;
+          ctx.strokeStyle = `rgba(245, 158, 11, ${0.35 + pulse * 0.4})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(0, 0, 16, 0, Math.PI * 2);
+          ctx.stroke();
+
+          // Plank 1 (angled)
+          ctx.save();
+          ctx.rotate(-0.25);
+          ctx.fillStyle = isThermalMode ? '#334155' : '#854d0e';
+          ctx.fillRect(-12, -4, 24, 7);
+          ctx.strokeStyle = '#451a03';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-12, -4, 24, 7);
+          // Grain & nail mark
+          ctx.fillStyle = '#a16207';
+          ctx.fillRect(-8, -2, 16, 1.5);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(-10, -1, 1.5, 1.5);
+          ctx.fillRect(8, -1, 1.5, 1.5);
+          ctx.restore();
+
+          // Plank 2 (overlapping cross)
+          ctx.save();
+          ctx.rotate(0.35);
+          ctx.fillStyle = isThermalMode ? '#475569' : '#a16207';
+          ctx.fillRect(-10, -3, 20, 6);
+          ctx.strokeStyle = '#5c3a1e';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-10, -3, 20, 6);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(-7, 0, 1.5, 1.5);
+          ctx.fillRect(6, 0, 1.5, 1.5);
+          ctx.restore();
+
+          ctx.restore();
+
+          // Pickup tag label above
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#f59e0b';
+          ctx.textAlign = 'center';
+          ctx.fillText('SCRAP WOOD', s.x + s.width / 2, s.y - 4);
+        } else if (s.type === 'tv_set') {
+          // Retro 90s CRT Television Console
+          // Casing
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#262626';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = '#171717';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Rabbit ear antenna on top
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(s.x + s.width / 2 - 2, s.y);
+          ctx.lineTo(s.x + s.width / 2 - 12, s.y - 10);
+          ctx.moveTo(s.x + s.width / 2 + 2, s.y);
+          ctx.lineTo(s.x + s.width / 2 + 12, s.y - 10);
+          ctx.stroke();
+
+          // Curved CRT screen
+          const screenW = s.width - 12;
+          const screenH = s.height - 8;
+          ctx.fillStyle = '#090d16';
+          ctx.beginPath();
+          ctx.roundRect(s.x + 4, s.y + 4, screenW, screenH, 3);
+          ctx.fill();
+
+          // Glowing CRT display with emergency broadcast flicker
+          const flicker = 0.5 + Math.sin(now * 0.02) * 0.25;
+          ctx.fillStyle = `rgba(6, 182, 212, ${flicker * 0.45})`;
+          ctx.beginPath();
+          ctx.roundRect(s.x + 5, s.y + 5, screenW - 2, screenH - 2, 2);
+          ctx.fill();
+
+          // Horizontal CRT scanline
+          const scanY = s.y + 5 + ((now * 0.04) % (screenH - 4));
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 5, scanY);
+          ctx.lineTo(s.x + 3 + screenW, scanY);
+          ctx.stroke();
+
+          // Tuning dials & red LED
+          ctx.fillStyle = '#ef4444';
+          ctx.beginPath();
+          ctx.arc(s.x + s.width - 5, s.y + 7, 1.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // "TV" label
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#38bdf8';
+          ctx.textAlign = 'center';
+          ctx.fillText('NEWS TV', s.x + s.width / 2, s.y + s.height + 8);
         } else if (s.type === 'medical_station') {
           // Emergency Medical Triage Station & Supply Cabinet
           ctx.fillStyle = isThermalMode ? '#1e3442' : '#f8fafc';
@@ -691,6 +868,745 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
           ctx.fillStyle = '#0f172a';
           ctx.textAlign = 'center';
           ctx.fillText('MEDIC', mcx, s.y + s.height - 2);
+        } else if (s.type === 'dirt_trench') {
+          // Excavated earthen dirt trench that slows zombies by 25%
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#332011';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = isThermalMode ? '#334155' : '#4d3019';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Inner dugout depth
+          ctx.fillStyle = isThermalMode ? '#0f172a' : '#1c1109';
+          ctx.fillRect(s.x + 3, s.y + 3, Math.max(2, s.width - 6), Math.max(2, s.height - 6));
+
+          // Earthen trench tracks
+          ctx.strokeStyle = '#5c3a1e';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 4, s.y + s.height / 2);
+          ctx.lineTo(s.x + s.width - 4, s.y + s.height / 2);
+          ctx.stroke();
+
+          // Soil clods
+          ctx.fillStyle = '#6b4323';
+          ctx.fillRect(s.x + 5, s.y + 5, 3, 3);
+          ctx.fillRect(s.x + s.width - 8, s.y + s.height - 8, 3, 3);
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#a16207';
+          ctx.textAlign = 'center';
+          ctx.fillText('TRENCH (-25%)', s.x + s.width / 2, s.y - 2);
+        } else if (s.type === 'wall_brick') {
+          // Solid Red Brick Masonry Wall (Breakable with Claw Hammer / Sledgehammer)
+          ctx.fillStyle = isThermalMode ? '#2a1a1a' : '#882b20';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = isThermalMode ? '#3f2525' : '#4d1610';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Horizontal mortar lines
+          ctx.strokeStyle = isThermalMode ? '#4b3535' : '#bca594';
+          ctx.lineWidth = 1;
+          const rows = Math.max(2, Math.floor(s.height / 8));
+          const rowH = s.height / rows;
+          for (let r = 1; r < rows; r++) {
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y + r * rowH);
+            ctx.lineTo(s.x + s.width, s.y + r * rowH);
+            ctx.stroke();
+          }
+
+          // Staggered vertical brick joints
+          for (let r = 0; r < rows; r++) {
+            const offset = (r % 2) * 10;
+            for (let bx = s.x + offset + 8; bx < s.x + s.width - 2; bx += 20) {
+              ctx.beginPath();
+              ctx.moveTo(bx, s.y + r * rowH);
+              ctx.lineTo(bx, s.y + (r + 1) * rowH);
+              ctx.stroke();
+            }
+          }
+
+          // Demolition / dismantling crack indicators
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            ctx.strokeStyle = '#facc15';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(s.x + 4, s.y + 4);
+            ctx.lineTo(s.x + s.width * 0.5, s.y + s.height * 0.7);
+            ctx.lineTo(s.x + s.width - 4, s.y + s.height - 4);
+            ctx.stroke();
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#ef4444';
+              ctx.fillRect(s.x + 3 + i * 7, s.y - 5, 5, 3);
+            }
+          }
+        } else if (s.type === 'wall_stone') {
+          // Tier 2 Fortified Cut Stone Masonry Wall (500 HP)
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#475569';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = isThermalMode ? '#334155' : '#1e293b';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Hewn granite stone block texture with chiseled bevels
+          ctx.strokeStyle = isThermalMode ? '#475569' : '#334155';
+          ctx.lineWidth = 1.5;
+          const rows = Math.max(2, Math.floor(s.height / 10));
+          const rowH = s.height / rows;
+          for (let r = 1; r < rows; r++) {
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y + r * rowH);
+            ctx.lineTo(s.x + s.width, s.y + r * rowH);
+            ctx.stroke();
+          }
+          for (let r = 0; r < rows; r++) {
+            const offset = (r % 2) * 14;
+            for (let bx = s.x + offset + 12; bx < s.x + s.width - 2; bx += 26) {
+              ctx.beginPath();
+              ctx.moveTo(bx, s.y + r * rowH);
+              ctx.lineTo(bx, s.y + (r + 1) * rowH);
+              ctx.stroke();
+            }
+          }
+
+          // Iron anchor tie pins
+          ctx.fillStyle = '#94a3b8';
+          for (let px = s.x + 8; px < s.x + s.width - 4; px += 24) {
+            ctx.fillRect(px, s.y + s.height / 2 - 1.5, 3, 3);
+          }
+        } else if (s.type === 'door_stone') {
+          // Reinforced Heavy Stone Door with Iron Cross Bands
+          const isHorizontal = s.width >= s.height;
+          if (s.isOpen) {
+            // Open heavy stone door threshold
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+            if (isHorizontal) {
+              const panelLen = Math.max(22, s.width - 4);
+              const panelThick = Math.min(s.height, 14);
+              ctx.fillStyle = isThermalMode ? '#1e293b' : '#334155';
+              ctx.fillRect(s.x, s.y - panelLen, panelThick, panelLen);
+              ctx.strokeStyle = '#64748b';
+              ctx.strokeRect(s.x, s.y - panelLen, panelThick, panelLen);
+              // Iron hinges
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x - 1, s.y - panelLen + 4, 3, 5);
+              ctx.fillRect(s.x - 1, s.y - 8, 3, 5);
+            } else {
+              const panelLen = Math.max(22, s.height - 4);
+              const panelThick = Math.min(s.width, 14);
+              ctx.fillStyle = isThermalMode ? '#1e293b' : '#334155';
+              ctx.fillRect(s.x + s.width, s.y, panelLen, panelThick);
+              ctx.strokeStyle = '#64748b';
+              ctx.strokeRect(s.x + s.width, s.y, panelLen, panelThick);
+              // Iron hinges
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x + s.width + 4, s.y - 1, 5, 3);
+              ctx.fillRect(s.x + s.width + panelLen - 8, s.y - 1, 5, 3);
+            }
+          } else {
+            // Closed stone door
+            ctx.fillStyle = isThermalMode ? '#1e293b' : '#374151';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            ctx.strokeStyle = isThermalMode ? '#0f172a' : '#111827';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+            // Heavy forged iron reinforcing bands
+            ctx.fillStyle = '#64748b';
+            if (isHorizontal) {
+              ctx.fillRect(s.x + 6, s.y, 4, s.height);
+              ctx.fillRect(s.x + s.width - 10, s.y, 4, s.height);
+              // Heavy sliding vault deadbolt
+              ctx.fillStyle = '#cbd5e1';
+              ctx.fillRect(s.x + s.width / 2 - 12, s.y + s.height / 2 - 3, 24, 6);
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x + s.width / 2 - 3, s.y + s.height / 2 - 5, 6, 10);
+            } else {
+              ctx.fillRect(s.x, s.y + 6, s.width, 4);
+              ctx.fillRect(s.x, s.y + s.height - 10, s.width, 4);
+              // Heavy sliding vault deadbolt
+              ctx.fillStyle = '#cbd5e1';
+              ctx.fillRect(s.x + s.width / 2 - 3, s.y + s.height / 2 - 12, 6, 24);
+              ctx.fillStyle = '#94a3b8';
+              ctx.fillRect(s.x + s.width / 2 - 5, s.y + s.height / 2 - 3, 10, 6);
+            }
+          }
+        } else if (s.type === 'trap_clay_pit') {
+          // Dense Clay Pit Trap (Mires zombies by 65%)
+          ctx.fillStyle = isThermalMode ? '#1f1610' : '#451a03';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = isThermalMode ? '#331e0f' : '#78350f';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Deep mire clay sludge
+          ctx.fillStyle = isThermalMode ? '#291809' : '#572506';
+          ctx.fillRect(s.x + 3, s.y + 3, Math.max(2, s.width - 6), Math.max(2, s.height - 6));
+
+          // Sticky sludge ripples
+          ctx.strokeStyle = '#9a3412';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(s.x + s.width * 0.35, s.y + s.height * 0.5, Math.min(s.width, s.height) * 0.25, 0, Math.PI);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(s.x + s.width * 0.65, s.y + s.height * 0.5, Math.min(s.width, s.height) * 0.2, Math.PI, Math.PI * 2);
+          ctx.stroke();
+
+          // Sticky mud bubbling clods
+          ctx.fillStyle = '#b45309';
+          ctx.beginPath();
+          ctx.arc(s.x + 6, s.y + 6, 2.5, 0, Math.PI * 2);
+          ctx.arc(s.x + s.width - 8, s.y + s.height - 7, 3, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#ea580c';
+          ctx.textAlign = 'center';
+          ctx.fillText('CLAY MIRE (-65%)', s.x + s.width / 2, s.y - 3);
+        } else if (s.type === 'trap_barbed_wire') {
+          // Razor Barbed Wire Entanglement (-50% speed + 8 contact damage)
+          ctx.fillStyle = isThermalMode ? 'rgba(30, 41, 59, 0.4)' : 'rgba(15, 23, 42, 0.45)';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+
+          // Iron T-posts at edges and center
+          ctx.fillStyle = '#64748b';
+          ctx.fillRect(s.x + 1, s.y - 2, 4, s.height + 4);
+          ctx.fillRect(s.x + s.width / 2 - 2, s.y - 2, 4, s.height + 4);
+          ctx.fillRect(s.x + s.width - 5, s.y - 2, 4, s.height + 4);
+
+          // Concertina coiled razor wire zigzag
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          const coils = Math.max(4, Math.floor(s.width / 12));
+          const stepX = s.width / coils;
+          for (let i = 0; i <= coils; i++) {
+            const wx = s.x + i * stepX;
+            const wy = i % 2 === 0 ? s.y + 3 : s.y + s.height - 3;
+            if (i === 0) ctx.moveTo(wx, wy);
+            else ctx.lineTo(wx, wy);
+          }
+          ctx.stroke();
+
+          // Secondary criss-cross wire
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          for (let i = 0; i <= coils; i++) {
+            const wx = s.x + i * stepX;
+            const wy = i % 2 === 0 ? s.y + s.height - 3 : s.y + 3;
+            if (i === 0) ctx.moveTo(wx, wy);
+            else ctx.lineTo(wx, wy);
+          }
+          ctx.stroke();
+
+          // Sharp razor barbs along wire
+          ctx.fillStyle = '#f1f5f9';
+          for (let i = 0; i < coils; i++) {
+            const bx = s.x + (i + 0.5) * stepX;
+            const by = s.y + s.height / 2;
+            ctx.fillRect(bx - 1.5, by - 3, 3, 6);
+            ctx.fillRect(bx - 3, by - 1.5, 6, 3);
+          }
+
+          // Blood spatters on wire from zombies
+          ctx.fillStyle = '#b91c1c';
+          ctx.fillRect(s.x + 7, s.y + 5, 2, 2);
+          ctx.fillRect(s.x + s.width * 0.6, s.y + s.height - 6, 2.5, 2);
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#f87171';
+          ctx.textAlign = 'center';
+          ctx.fillText('RAZOR WIRE (-50% + DMG)', s.x + s.width / 2, s.y - 3);
+        } else if (s.type === 'abandoned_car') {
+          // Abandoned Wrecked Sedan / Station Wagon (Pryable with Tempered Crowbar -> Iron Pipes)
+          const isWide = s.width >= s.height;
+          // Tires
+          ctx.fillStyle = '#0f172a';
+          if (isWide) {
+            ctx.fillRect(s.x + 8, s.y - 3, 14, 5);
+            ctx.fillRect(s.x + s.width - 22, s.y - 3, 14, 5);
+            ctx.fillRect(s.x + 8, s.y + s.height - 2, 14, 5);
+            ctx.fillRect(s.x + s.width - 22, s.y + s.height - 2, 14, 5);
+          } else {
+            ctx.fillRect(s.x - 3, s.y + 8, 5, 14);
+            ctx.fillRect(s.x - 3, s.y + s.height - 22, 5, 14);
+            ctx.fillRect(s.x + s.width - 2, s.y + 8, 5, 14);
+            ctx.fillRect(s.x + s.width - 2, s.y + s.height - 22, 5, 14);
+          }
+
+          // Car body chassis
+          ctx.fillStyle = isThermalMode ? '#283545' : '#3b4252';
+          ctx.beginPath();
+          ctx.roundRect(s.x, s.y, s.width, s.height, 6);
+          ctx.fill();
+          ctx.strokeStyle = isThermalMode ? '#3f536b' : '#1e2430';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // Rusted oxidized patches
+          ctx.fillStyle = '#7c2d12';
+          ctx.fillRect(s.x + 6, s.y + 4, 12, 8);
+          ctx.fillRect(s.x + s.width - 20, s.y + s.height - 12, 14, 8);
+
+          // Roof and windshields
+          if (isWide) {
+            // Windshield (front)
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(s.x + s.width * 0.22, s.y + 4, s.width * 0.16, s.height - 8);
+            // Rear glass
+            ctx.fillRect(s.x + s.width * 0.65, s.y + 4, s.width * 0.14, s.height - 8);
+            // Roof center
+            ctx.fillStyle = isThermalMode ? '#1e293b' : '#2e3440';
+            ctx.fillRect(s.x + s.width * 0.38, s.y + 3, s.width * 0.27, s.height - 6);
+            // Glass crack
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(s.x + s.width * 0.25, s.y + 5);
+            ctx.lineTo(s.x + s.width * 0.32, s.y + s.height - 5);
+            ctx.stroke();
+            // Headlights & Taillights
+            ctx.fillStyle = '#fde047';
+            ctx.fillRect(s.x + 1, s.y + 3, 3, 5);
+            ctx.fillRect(s.x + 1, s.y + s.height - 8, 3, 5);
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(s.x + s.width - 4, s.y + 3, 3, 5);
+            ctx.fillRect(s.x + s.width - 4, s.y + s.height - 8, 3, 5);
+          } else {
+            // Vertical orientation
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(s.x + 4, s.y + s.height * 0.22, s.width - 8, s.height * 0.16);
+            ctx.fillRect(s.x + 4, s.y + s.height * 0.65, s.width - 8, s.height * 0.14);
+            ctx.fillStyle = isThermalMode ? '#1e293b' : '#2e3440';
+            ctx.fillRect(s.x + 3, s.y + s.height * 0.38, s.width - 6, s.height * 0.27);
+            // Headlights & Taillights
+            ctx.fillStyle = '#fde047';
+            ctx.fillRect(s.x + 3, s.y + 1, 5, 3);
+            ctx.fillRect(s.x + s.width - 8, s.y + 1, 5, 3);
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(s.x + 3, s.y + s.height - 4, 5, 3);
+            ctx.fillRect(s.x + s.width - 8, s.y + s.height - 4, 5, 3);
+          }
+
+          // Crowbar prying hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.35)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#38bdf8';
+              ctx.fillRect(s.x + 4 + i * 8, s.y - 5, 6, 3);
+            }
+          }
+
+          // Label
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.textAlign = 'center';
+          ctx.fillText('WRECKED CAR [PRY]', s.x + s.width / 2, s.y + s.height / 2 + 3);
+        } else if (s.type === 'riverbed_clay') {
+          // Alluvial Riverbed Dense Clay Deposit (Dig with Steel Spade -> Dense Clay)
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#78350f';
+          ctx.beginPath();
+          ctx.roundRect(s.x, s.y, s.width, s.height, 8);
+          ctx.fill();
+          ctx.strokeStyle = '#9a3412';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          // Wet clay silt contours
+          ctx.fillStyle = '#92400e';
+          ctx.beginPath();
+          ctx.roundRect(s.x + 4, s.y + 4, s.width - 8, s.height - 8, 6);
+          ctx.fill();
+
+          // Clay sheen & smooth river pebbles
+          ctx.fillStyle = '#d97706';
+          ctx.beginPath();
+          ctx.arc(s.x + s.width * 0.3, s.y + s.height * 0.4, 5, 0, Math.PI * 2);
+          ctx.arc(s.x + s.width * 0.7, s.y + s.height * 0.6, 6, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#64748b';
+          ctx.beginPath();
+          ctx.arc(s.x + s.width * 0.45, s.y + s.height * 0.65, 3, 0, Math.PI * 2);
+          ctx.arc(s.x + s.width * 0.75, s.y + s.height * 0.3, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Excavation hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(234, 88, 12, 0.4)';
+            ctx.beginPath();
+            ctx.roundRect(s.x, s.y, s.width, s.height, 8);
+            ctx.fill();
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#ea580c';
+              ctx.fillRect(s.x + 4 + i * 8, s.y - 5, 6, 3);
+            }
+          }
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#fde68a';
+          ctx.textAlign = 'center';
+          ctx.fillText('DENSE CLAY BED', s.x + s.width / 2, s.y + s.height / 2 + 3);
+        } else if (s.type === 'utility_pole') {
+          // Industrial Creosote Timber Utility Pole (Fell with Motorized Saw -> Treated Planks)
+          const cx = s.x + s.width / 2;
+          const cy = s.y + s.height / 2;
+
+          // Main vertical creosote timber mast
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#3d2514';
+          ctx.fillRect(cx - 3, s.y, 6, s.height);
+          ctx.strokeStyle = '#23150b';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(cx - 3, s.y, 6, s.height);
+
+          // Horizontal crossarm timber beams
+          ctx.fillStyle = isThermalMode ? '#3c586c' : '#57331b';
+          ctx.fillRect(s.x + 2, s.y + 4, Math.max(12, s.width - 4), 3.5);
+          ctx.fillRect(s.x + 4, s.y + 12, Math.max(8, s.width - 8), 3);
+
+          // Ceramic insulator bells
+          ctx.fillStyle = '#38bdf8';
+          ctx.beginPath();
+          ctx.arc(s.x + 4, s.y + 3, 2, 0, Math.PI * 2);
+          ctx.arc(s.x + s.width - 4, s.y + 3, 2, 0, Math.PI * 2);
+          ctx.arc(cx, s.y + 11, 2, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Drooping transformer wires
+          ctx.strokeStyle = '#1e293b';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 2, s.y + 4);
+          ctx.quadraticCurveTo(cx, s.y + 10, s.x + s.width - 2, s.y + 4);
+          ctx.stroke();
+
+          // Dismantle hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(168, 85, 247, 0.4)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#a855f7';
+              ctx.fillRect(s.x + 2 + i * 8, s.y - 5, 6, 3);
+            }
+          }
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#c084fc';
+          ctx.textAlign = 'center';
+          ctx.fillText('UTILITY POLE [SAW]', cx, s.y + s.height + 8);
+        } else if (s.type === 'home_foundation') {
+          // Crushed Concrete House Footing Foundation (Sledgehammer -> Concrete Mix)
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#475569';
+          ctx.beginPath();
+          ctx.roundRect(s.x, s.y, s.width, s.height, 4);
+          ctx.fill();
+          ctx.strokeStyle = isThermalMode ? '#3c586c' : '#334155';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // Concrete aggregate specks
+          ctx.fillStyle = '#64748b';
+          ctx.fillRect(s.x + 4, s.y + 4, s.width - 8, s.height - 8);
+
+          // Exposed rusted rebar ties
+          ctx.strokeStyle = '#ea580c';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 3, s.y + 3);
+          ctx.lineTo(s.x + 9, s.y + 9);
+          ctx.moveTo(s.x + s.width - 3, s.y + s.height - 3);
+          ctx.lineTo(s.x + s.width - 9, s.y + s.height - 9);
+          ctx.stroke();
+
+          // Formwork concrete pour lines
+          ctx.strokeStyle = '#334155';
+          ctx.lineWidth = 1;
+          for (let py = s.y + 7; py < s.y + s.height - 4; py += 7) {
+            ctx.beginPath();
+            ctx.moveTo(s.x + 4, py);
+            ctx.lineTo(s.x + s.width - 4, py);
+            ctx.stroke();
+          }
+
+          // Dismantle hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#ef4444';
+              ctx.fillRect(s.x + 2 + i * 7, s.y - 5, 5, 3);
+            }
+          }
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.textAlign = 'center';
+          ctx.fillText('FOUNDATION [SLEDGE]', s.x + s.width / 2, s.y + s.height / 2 + 3);
+        } else if (s.type === 'bank_vault') {
+          // Reinforced Steel Bank Vault Safe (Heavy Breaker -> Steel Plates)
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#0f172a';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Ballistic steel plate inset
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#1e293b';
+          ctx.fillRect(s.x + 4, s.y + 4, s.width - 8, s.height - 8);
+
+          // Giant circular safe lock wheel
+          const vx = s.x + s.width / 2;
+          const vy = s.y + s.height / 2;
+          const vr = Math.min(s.width, s.height) * 0.28;
+
+          ctx.fillStyle = '#334155';
+          ctx.beginPath();
+          ctx.arc(vx, vy, vr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // 4-spoke lock wheel handle
+          ctx.strokeStyle = '#f8fafc';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(vx - vr, vy);
+          ctx.lineTo(vx + vr, vy);
+          ctx.moveTo(vx, vy - vr);
+          ctx.lineTo(vx, vy + vr);
+          ctx.stroke();
+
+          // Center brass hub
+          ctx.fillStyle = '#f59e0b';
+          ctx.beginPath();
+          ctx.arc(vx, vy, 3, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Heavy corner locking bolts
+          ctx.fillStyle = '#cbd5e1';
+          ctx.fillRect(s.x + 3, s.y + 3, 3, 3);
+          ctx.fillRect(s.x + s.width - 6, s.y + 3, 3, 3);
+          ctx.fillRect(s.x + 3, s.y + s.height - 6, 3, 3);
+          ctx.fillRect(s.x + s.width - 6, s.y + s.height - 6, 3, 3);
+
+          // Dismantle hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.4)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#38bdf8';
+              ctx.fillRect(s.x + 2 + i * 7, s.y - 5, 5, 3);
+            }
+          }
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#38bdf8';
+          ctx.textAlign = 'center';
+          ctx.fillText('BANK VAULT [BREAKER]', vx, s.y + s.height + 8);
+        } else if (s.type === 'boulder_rock') {
+          // Craggy Granite Bedrock Boulder (Power Trencher -> Gravel)
+          const rx = s.x + s.width / 2;
+          const ry = s.y + s.height / 2;
+          const rad = Math.min(s.width, s.height) / 2;
+
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#475569';
+          ctx.beginPath();
+          ctx.arc(rx, ry, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#1e293b';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // Rock facets and fissures
+          ctx.fillStyle = '#334155';
+          ctx.beginPath();
+          ctx.arc(rx - rad * 0.3, ry - rad * 0.2, rad * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Mineral vein
+          ctx.strokeStyle = '#e2e8f0';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 4, ry - 3);
+          ctx.lineTo(rx + 2, ry + 2);
+          ctx.lineTo(s.x + s.width - 4, ry + 5);
+          ctx.stroke();
+
+          // Dismantle hits indicator
+          if (s.dismantleHits && s.dismantleHits > 0) {
+            ctx.fillStyle = 'rgba(226, 232, 240, 0.4)';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            for (let i = 0; i < s.dismantleHits; i++) {
+              ctx.fillStyle = '#e2e8f0';
+              ctx.fillRect(s.x + 2 + i * 8, s.y - 5, 6, 3);
+            }
+          }
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.textAlign = 'center';
+          ctx.fillText('ROCK [TRENCHER]', rx, ry + 3);
+        } else if (s.type === 'wall_steel') {
+          // Tier 3 Ballistic Armored Steel Wall (1000 HP)
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#0f172a';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Heavy industrial riveted steel panels
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#1e293b';
+          ctx.fillRect(s.x + 2, s.y + 2, s.width - 4, s.height - 4);
+
+          // Diagonal structural reinforcing beams
+          ctx.strokeStyle = '#334155';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(s.x + 3, s.y + 3);
+          ctx.lineTo(s.x + s.width - 3, s.y + s.height - 3);
+          ctx.moveTo(s.x + s.width - 3, s.y + 3);
+          ctx.lineTo(s.x + 3, s.y + s.height - 3);
+          ctx.stroke();
+
+          // Steel rivets along frame
+          ctx.fillStyle = '#94a3b8';
+          for (let rx = s.x + 5; rx < s.x + s.width - 2; rx += 14) {
+            ctx.fillRect(rx, s.y + 1, 2.5, 2.5);
+            ctx.fillRect(rx, s.y + s.height - 3.5, 2.5, 2.5);
+          }
+        } else if (s.type === 'wall_concrete') {
+          // Tier 3 Poured Reinforced Concrete Wall (850 HP)
+          ctx.fillStyle = isThermalMode ? '#283b48' : '#64748b';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = isThermalMode ? '#3c586c' : '#334155';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Aggregate gravel & rebar tie points
+          ctx.fillStyle = '#475569';
+          ctx.fillRect(s.x + 2, s.y + 2, s.width - 4, s.height - 4);
+
+          // Formwork tie holes
+          ctx.fillStyle = '#0f172a';
+          for (let tx = s.x + 8; tx < s.x + s.width - 4; tx += 20) {
+            ctx.beginPath();
+            ctx.arc(tx, s.y + s.height * 0.35, 2, 0, Math.PI * 2);
+            ctx.arc(tx, s.y + s.height * 0.65, 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else if (s.type === 'door_steel') {
+          // Tier 3 Heavy Steel Security Door (800 HP)
+          const isHorizontal = s.width >= s.height;
+          if (s.isOpen) {
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+            if (isHorizontal) {
+              const panelLen = Math.max(22, s.width - 4);
+              const panelThick = Math.min(s.height, 14);
+              ctx.fillStyle = '#1e293b';
+              ctx.fillRect(s.x, s.y - panelLen, panelThick, panelLen);
+              ctx.strokeStyle = '#38bdf8';
+              ctx.strokeRect(s.x, s.y - panelLen, panelThick, panelLen);
+            } else {
+              const panelLen = Math.max(22, s.height - 4);
+              const panelThick = Math.min(s.width, 14);
+              ctx.fillStyle = '#1e293b';
+              ctx.fillRect(s.x + s.width, s.y, panelLen, panelThick);
+              ctx.strokeStyle = '#38bdf8';
+              ctx.strokeRect(s.x + s.width, s.y, panelLen, panelThick);
+            }
+          } else {
+            ctx.fillStyle = isThermalMode ? '#1e293b' : '#0f172a';
+            ctx.fillRect(s.x, s.y, s.width, s.height);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+            // Armored door center panel
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(s.x + 3, s.y + 3, s.width - 6, s.height - 6);
+
+            // Electronic biometric latch
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(s.x + s.width / 2 - 4, s.y + s.height / 2 - 2, 8, 4);
+          }
+        } else if (s.type === 'trap_acid_pit') {
+          // Tier 3 Industrial Corrosive Acid Pit (-60% speed, 25 DPS)
+          ctx.fillStyle = isThermalMode ? '#052e16' : '#14532d';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = '#22c55e';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Bubbling green corrosive acid pool
+          ctx.fillStyle = '#16a34a';
+          ctx.fillRect(s.x + 3, s.y + 3, Math.max(2, s.width - 6), Math.max(2, s.height - 6));
+
+          // Chemical bubbling effect
+          const bubble = Math.sin(now * 0.008) * 2;
+          ctx.fillStyle = '#4ade80';
+          ctx.beginPath();
+          ctx.arc(s.x + s.width * 0.35, s.y + s.height * 0.5 + bubble, 3.5, 0, Math.PI * 2);
+          ctx.arc(s.x + s.width * 0.7, s.y + s.height * 0.45 - bubble, 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#86efac';
+          ctx.textAlign = 'center';
+          ctx.fillText('ACID PIT (-60% + 25 DPS)', s.x + s.width / 2, s.y - 3);
+        } else if (s.type === 'trap_shredder') {
+          // Tier 3 Motorized Rotary Blade Shredder (-70% speed, 35 contact damage)
+          ctx.fillStyle = isThermalMode ? '#1e293b' : '#0f172a';
+          ctx.fillRect(s.x, s.y, s.width, s.height);
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(s.x, s.y, s.width, s.height);
+
+          // Motorized spinning blades
+          const rotAngle = (now * 0.015) % (Math.PI * 2);
+          const scx = s.x + s.width / 2;
+          const scy = s.y + s.height / 2;
+
+          ctx.save();
+          ctx.translate(scx, scy);
+          ctx.rotate(rotAngle);
+          ctx.strokeStyle = '#cbd5e1';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(-s.width * 0.4, 0);
+          ctx.lineTo(s.width * 0.4, 0);
+          ctx.moveTo(0, -s.height * 0.4);
+          ctx.lineTo(0, s.height * 0.4);
+          ctx.stroke();
+
+          // Serrated teeth on blades
+          ctx.fillStyle = '#f87171';
+          ctx.fillRect(-s.width * 0.35, -2, 4, 4);
+          ctx.fillRect(s.width * 0.35 - 4, -2, 4, 4);
+          ctx.restore();
+
+          // Splatter
+          ctx.fillStyle = '#b91c1c';
+          ctx.fillRect(s.x + 4, s.y + 4, 3, 3);
+          ctx.fillRect(s.x + s.width - 7, s.y + s.height - 7, 3, 3);
+
+          ctx.font = 'bold 7px monospace';
+          ctx.fillStyle = '#f87171';
+          ctx.textAlign = 'center';
+          ctx.fillText('SHREDDER (-70% + 35 DMG)', scx, s.y - 3);
         } else {
           // Fallback rendering for any custom or procedural structure (never invisible!)
           ctx.fillStyle = isThermalMode ? '#283b48' : '#334155';
@@ -706,7 +1622,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         }
 
         // Structural Integrity Indicator if damaged
-        if (s.hp < s.maxHp && (s.type.includes('wall') || s.type.includes('fence') || s.type === 'door_wood' || s.type === 'barricade_window')) {
+        if (s.hp < s.maxHp && (s.type.includes('wall') || s.type.includes('fence') || s.type.includes('door') || s.type === 'barricade_window' || s.type === 'abandoned_car' || s.type === 'riverbed_clay' || s.type === 'utility_pole' || s.type === 'home_foundation' || s.type === 'bank_vault' || s.type === 'boulder_rock')) {
           const barW = Math.max(16, Math.min(32, s.width));
           const barX = s.x + (s.width - barW) / 2;
           const barY = s.y - 5;
@@ -1112,6 +2028,91 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         ctx.restore();
       }
 
+      // 7b. DYNAMIC RAIN VISUAL EFFECTS (Falling Rain Streaks, Ground Ripples, Storm Mist, Lightning)
+      const isRainingWeather =
+        environment.weather.includes('Rain') ||
+        environment.weather === 'Thunderstorm' ||
+        environment.weather === 'Heavy Rain' ||
+        environment.weather === 'Freezing Rain';
+
+      if (isRainingWeather && !isThermalMode) {
+        ctx.save();
+        const isThunder = environment.weather === 'Thunderstorm';
+        const isHeavy = environment.weather === 'Heavy Rain' || isThunder;
+
+        // A. Lightning flash for Thunderstorm
+        if (isThunder) {
+          const thunderCycle = now % 10500;
+          const isLightning = thunderCycle < 75 || (thunderCycle > 140 && thunderCycle < 220);
+          if (isLightning) {
+            ctx.fillStyle = 'rgba(240, 249, 255, 0.42)';
+            ctx.fillRect(viewLeft, viewTop, viewWidth, viewHeight);
+          }
+        }
+
+        // B. Ground Splash Ripples (Raindrops impacting the terrain)
+        const rippleCount = isHeavy ? 32 : 18;
+        for (let r = 0; r < rippleCount; r++) {
+          const rSeed = r * 197.3;
+          const rPeriod = 900;
+          const rTime = (now + rSeed * 7) % rPeriod;
+          const rProg = rTime / rPeriod;
+          const rx = viewLeft + ((rSeed * 43.17) % viewWidth);
+          const ry = viewTop + ((rSeed * 89.23) % viewHeight);
+          const rRadius = 2 + rProg * (isHeavy ? 10 : 7);
+          const rAlpha = (1 - rProg) * (isHeavy ? 0.45 : 0.30);
+
+          ctx.strokeStyle = `rgba(186, 230, 253, ${rAlpha})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(rx, ry, rRadius, rRadius * 0.45, 0, 0, Math.PI * 2);
+          ctx.stroke();
+
+          // Tiny splash droplet particles jumping up on impact
+          if (rProg < 0.35) {
+            const jumpProg = rProg / 0.35;
+            const dropAlpha = (1 - jumpProg) * 0.5;
+            ctx.fillStyle = `rgba(224, 242, 254, ${dropAlpha})`;
+            ctx.fillRect(rx - 1.5, ry - jumpProg * 6, 1.5, 1.5);
+            ctx.fillRect(rx + 1.5, ry - jumpProg * 5, 1.5, 1.5);
+          }
+        }
+
+        // C. Animated Falling Slanted Rain Streaks
+        const dropCount = isHeavy ? 260 : 160;
+        const streakAngle = 1.25; // ~72 degrees slanted with wind
+        const streakLen = isHeavy ? 26 : 18;
+        const dx = Math.cos(streakAngle) * streakLen;
+        const dy = Math.sin(streakAngle) * streakLen;
+        const fallSpeed = isHeavy ? 1.8 : 1.35;
+
+        ctx.strokeStyle = isThunder ? 'rgba(215, 235, 255, 0.55)' : 'rgba(186, 230, 253, 0.42)';
+        ctx.lineWidth = isHeavy ? 1.4 : 1.0;
+
+        ctx.beginPath();
+        for (let i = 0; i < dropCount; i++) {
+          const iSeed = i * 79.19;
+          const xOffset = (iSeed * 37.7) % viewWidth;
+          const yOffset = (iSeed * 91.1) % viewHeight;
+
+          const dropX = viewLeft + ((xOffset + now * (fallSpeed * 0.35)) % viewWidth);
+          const dropY = viewTop + ((yOffset + now * fallSpeed) % viewHeight);
+
+          ctx.moveTo(dropX, dropY);
+          ctx.lineTo(dropX + dx, dropY + dy);
+        }
+        ctx.stroke();
+
+        // D. Atmospheric Stormy Mist Overlay
+        const stormMist = ctx.createLinearGradient(viewLeft, viewTop, viewLeft, viewTop + viewHeight);
+        stormMist.addColorStop(0, isThunder ? 'rgba(15, 23, 42, 0.20)' : 'rgba(30, 41, 59, 0.12)');
+        stormMist.addColorStop(1, isThunder ? 'rgba(15, 23, 42, 0.28)' : 'rgba(30, 41, 59, 0.16)');
+        ctx.fillStyle = stormMist;
+        ctx.fillRect(viewLeft, viewTop, viewWidth, viewHeight);
+
+        ctx.restore();
+      }
+
       // 8. Acoustic Sound Wave Rings
       soundEvents.forEach((snd) => {
         const age = now - snd.timestamp;
@@ -1308,6 +2309,116 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         ctx.restore();
       }
 
+      // Direct hover highlight when mouse is positioned directly over an interactable object
+      const mx = mousePos.x;
+      const my = mousePos.y;
+      const hoveredDirectStructure = structures.find((s) => {
+        const isInteractable =
+          s.type === 'door_wood' ||
+          s.type === 'door_stone' ||
+          s.type === 'wall_brick' ||
+          s.type === 'abandoned_car' ||
+          s.type === 'riverbed_clay' ||
+          s.type === 'tree' ||
+          s.type === 'loot_container' ||
+          s.type === 'ground_scrap_wood' ||
+          s.type === 'tv_set' ||
+          s.type === 'workbench' ||
+          s.type === 'kitchen_stove' ||
+          s.type === 'campfire' ||
+          s.type === 'bed' ||
+          s.type === 'sleeping_mat' ||
+          s.type === 'rain_collector' ||
+          (s.type === 'fruit_bush' && (s.fruitCount ?? 0) > 0);
+        if (!isInteractable) return false;
+        return (
+          mx >= s.x - 5 &&
+          mx <= s.x + s.width + 5 &&
+          my >= s.y - 5 &&
+          my <= s.y + s.height + 5
+        );
+      });
+
+      const hoveredDirectNpc = npcs.find((n) => Math.hypot(n.x - mx, n.y - my) <= 22);
+
+      if (hoveredDirectStructure && !placementGhost) {
+        ctx.save();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(
+          hoveredDirectStructure.x - 2,
+          hoveredDirectStructure.y - 2,
+          hoveredDirectStructure.width + 4,
+          hoveredDirectStructure.height + 4
+        );
+        ctx.setLineDash([]);
+
+        const isToolBox =
+          hoveredDirectStructure.name.toLowerCase().includes('tool box') ||
+          hoveredDirectStructure.name.toLowerCase().includes('toolbox');
+
+        const actionName =
+          hoveredDirectStructure.type === 'ground_scrap_wood'
+            ? 'Pick Up Scrap Wood'
+            : hoveredDirectStructure.type === 'tv_set'
+            ? 'Emergency TV'
+            : hoveredDirectStructure.type === 'door_wood'
+            ? (hoveredDirectStructure.isOpen ? 'Close Door' : 'Open Door')
+            : isToolBox
+            ? 'Loot Tool Box'
+            : hoveredDirectStructure.type === 'loot_container'
+            ? 'Loot Chest'
+            : hoveredDirectStructure.type === 'workbench'
+            ? 'Workbench'
+            : hoveredDirectStructure.type === 'kitchen_stove' || hoveredDirectStructure.type === 'campfire'
+            ? 'Kitchen'
+            : hoveredDirectStructure.type === 'bed' || hoveredDirectStructure.type === 'sleeping_mat'
+            ? 'Sleep'
+            : hoveredDirectStructure.type === 'rain_collector'
+            ? 'Water'
+            : 'Harvest';
+
+        const tagText = `[Right-Click: ${actionName}]`;
+        ctx.font = 'bold 10px monospace';
+        const tagW = ctx.measureText(tagText).width;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(mx + 12, my - 22, tagW + 10, 18, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.fillText(tagText, mx + 17, my - 9);
+        ctx.restore();
+      } else if (hoveredDirectNpc && !placementGhost) {
+        ctx.save();
+        ctx.strokeStyle = '#a855f7';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.arc(hoveredDirectNpc.x, hoveredDirectNpc.y, 22, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const tagText = `[Right-Click: Speak]`;
+        ctx.font = 'bold 10px monospace';
+        const tagW = ctx.measureText(tagText).width;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+        ctx.strokeStyle = '#a855f7';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(mx + 12, my - 22, tagW + 10, 18, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#c084fc';
+        ctx.fillText(tagText, mx + 17, my - 9);
+        ctx.restore();
+      }
+
       // 12. Crosshair / Aim Cursor with Panic Inaccuracy & Tremor
       const panicRatio = survivor.panic / 100;
       const tremorX = panicRatio > 0 ? (Math.sin(now * 0.045) + Math.cos(now * 0.071)) * panicRatio * 8 : 0;
@@ -1345,7 +2456,110 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
       }
       ctx.restore();
 
+      // 13. In-world Comic / Tactical Speech Bubble above Survivor's Head
+      if (speechBubble && speechBubble.expiresAt > Date.now()) {
+        ctx.save();
+        const bubbleX = survivor.x;
+        const bubbleY = survivor.y - 28;
+
+        ctx.font = 'bold 10px monospace';
+        const maxTextWidth = 220;
+        const words = speechBubble.text.split(' ');
+        const lines: string[] = [];
+        let curLine = '';
+
+        for (const w of words) {
+          const test = curLine ? `${curLine} ${w}` : w;
+          if (ctx.measureText(test).width > maxTextWidth && curLine) {
+            lines.push(curLine);
+            curLine = w;
+          } else {
+            curLine = test;
+          }
+        }
+        if (curLine) lines.push(curLine);
+
+        let longestLineW = 0;
+        for (const line of lines) {
+          const lw = ctx.measureText(line).width;
+          if (lw > longestLineW) longestLineW = lw;
+        }
+
+        const padX = 10;
+        const padY = 7;
+        const lineHeight = 13;
+        const bubbleW = Math.max(100, longestLineW + padX * 2);
+        const bubbleH = lines.length * lineHeight + padY * 2 + 10;
+        const boxLeft = bubbleX - bubbleW / 2;
+        const boxTop = bubbleY - bubbleH;
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.beginPath();
+        ctx.roundRect(boxLeft + 2, boxTop + 2, bubbleW, bubbleH, 6);
+        ctx.fill();
+
+        // Bubble Box
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(boxLeft, boxTop, bubbleW, bubbleH, 6);
+        ctx.fill();
+        ctx.stroke();
+
+        // Speech Pointer Tail towards survivor
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+        ctx.beginPath();
+        ctx.moveTo(bubbleX - 6, boxTop + bubbleH - 0.5);
+        ctx.lineTo(bubbleX + 6, boxTop + bubbleH - 0.5);
+        ctx.lineTo(bubbleX, boxTop + bubbleH + 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(bubbleX - 6, boxTop + bubbleH - 0.5);
+        ctx.lineTo(bubbleX, boxTop + bubbleH + 8);
+        ctx.lineTo(bubbleX + 6, boxTop + bubbleH - 0.5);
+        ctx.stroke();
+
+        // Speaker label
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#fbbf24';
+        ctx.textAlign = 'left';
+        ctx.fillText(`💬 ${(speechBubble.speaker || 'James').toUpperCase()}`, boxLeft + padX, boxTop + padY + 6);
+
+        // Text lines
+        ctx.font = 'bold 9.5px monospace';
+        ctx.fillStyle = '#f8fafc';
+        let ty = boxTop + padY + 19;
+        for (const l of lines) {
+          ctx.fillText(l, boxLeft + padX, ty);
+          ty += lineHeight;
+        }
+
+        ctx.restore();
+      }
+
       ctx.restore(); // Restore camera transform
+
+      // Screen-space lens water droplets during rain
+      if (isRainingWeather && !isThermalMode) {
+        ctx.save();
+        for (let d = 0; d < 14; d++) {
+          const dSeed = d * 133.7;
+          const cycle = (now * 0.05 + dSeed * 10) % 700;
+          const lx = (dSeed * 61) % width;
+          const ly = ((dSeed * 97) % (height * 0.85)) + cycle * 0.25;
+          const dropAlpha = Math.max(0, 0.32 - (cycle / 700) * 0.32);
+          ctx.fillStyle = `rgba(186, 230, 253, ${dropAlpha})`;
+          ctx.beginPath();
+          ctx.ellipse(lx, ly, 2.5, 4.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
 
       animId = requestAnimationFrame(render);
     };
@@ -1370,6 +2584,7 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
     isHeatmapMode,
     zoom,
     buildings,
+    speechBubble,
     getCameraOffset,
   ]);
 
@@ -1383,7 +2598,9 @@ export const SimulationCanvas: React.FC<SimulationCanvasProps> = ({
         onContextMenu={handleContextMenu}
         onWheel={handleWheel}
         onMouseMove={handleMouseMove}
-        className="w-full h-full object-contain cursor-crosshair border border-neutral-800"
+        className={`w-full h-full object-contain border border-neutral-800 ${
+          isHoveringInteractable ? 'cursor-pointer' : 'cursor-crosshair'
+        }`}
       />
 
       {/* Canvas Top Bar Controls & Mode Toggles */}

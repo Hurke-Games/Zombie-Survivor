@@ -192,7 +192,7 @@ const PROFESSIONS: {
     },
     dialogue: 'Watch the rafters! I built half the timber cabins in this sector. Let me join your base and I can maintain walls, reinforce doors, and repair damage.',
     startingSupplies: [
-      { id: 'npc_carp_planks', name: 'Wood Planks', category: 'resource', count: 5, weight: 3.0, description: 'Pine framing boards.' },
+      { id: 'simple_wood_plank', name: 'Simple Wood Planks', category: 'resource', count: 5, weight: 3.0, description: 'Pine framing boards.' },
       { id: 'npc_carp_nails', name: 'Box of Nails', category: 'resource', count: 12, weight: 0.6, description: 'Framing nails.' },
     ],
   },
@@ -313,7 +313,11 @@ export function generateChunk(
     'farm_orchard',
   ];
 
-  const chunkType = types[Math.floor(rng() * types.length)];
+  let chunkType = types[Math.floor(rng() * types.length)];
+  // Spoken clue: "My neighbor three blocks west had some tools..." -> Sector [-3, 0] is guaranteed to be neighbor's house
+  if (chunkX === -3 && chunkY === 0) {
+    chunkType = 'suburban_house';
+  }
   let name = `Sector [${chunkX}, ${chunkY}]`;
 
   const structures: WorldStructure[] = [];
@@ -377,6 +381,44 @@ export function generateChunk(
       });
     }
 
+    // 2 - 3 Riverbed Clay Deposits along natural depressions/forest creek
+    const clayCount = 2 + Math.floor(rng() * 2);
+    for (let i = 0; i < clayCount; i++) {
+      const cx = baseX + 70 + Math.floor(rng() * (CHUNK_SIZE - 140));
+      const cy = baseY + 70 + Math.floor(rng() * (CHUNK_SIZE - 140));
+      structures.push({
+        id: `clay_${key}_${i}`,
+        x: cx,
+        y: cy,
+        width: 44,
+        height: 44,
+        type: 'riverbed_clay',
+        name: 'Riverbed Clay Deposit',
+        hp: 120,
+        maxHp: 120,
+        chunkKey: key,
+      });
+    }
+
+    // 2 - 3 Boulders / Quarry Rocks in Forest (Power Trencher pulverizes for Gravel)
+    const rockCount = 2 + Math.floor(rng() * 2);
+    for (let i = 0; i < rockCount; i++) {
+      const rx = baseX + 90 + Math.floor(rng() * (CHUNK_SIZE - 180));
+      const ry = baseY + 90 + Math.floor(rng() * (CHUNK_SIZE - 180));
+      structures.push({
+        id: `rock_${key}_${i}`,
+        x: rx,
+        y: ry,
+        width: 44,
+        height: 40,
+        type: 'boulder_rock',
+        name: 'Granite Quarry Boulder',
+        hp: 300,
+        maxHp: 300,
+        chunkKey: key,
+      });
+    }
+
     // Stranded Hunter Survivor (15% chance)
     if (rng() < 0.18) {
       npcs.push(
@@ -424,15 +466,57 @@ export function generateChunk(
       height: hh,
     });
 
-    // Walls
+    // Walls (North & West walls are Red Brick Walls that player can break down with Claw Hammer for Stone Blocks!)
     structures.push(
-      { id: `wall_${key}_n`, x: hx, y: hy, width: hw, height: 16, type: 'wall_wood', name: 'Timber Wall', hp: 250, maxHp: 250, repairPlanks: 3, repairNails: 4, chunkKey: key },
+      { id: `wall_${key}_n`, x: hx, y: hy, width: hw, height: 16, type: 'wall_brick', name: 'Red Brick Wall', hp: 400, maxHp: 400, chunkKey: key },
       { id: `wall_${key}_s1`, x: hx, y: hy + hh - 16, width: 120, height: 16, type: 'wall_wood', name: 'Timber Wall', hp: 250, maxHp: 250, repairPlanks: 3, repairNails: 4, chunkKey: key },
       { id: `door_${key}`, x: hx + 120, y: hy + hh - 16, width: 60, height: 16, type: 'door_wood', name: 'Cabin Front Door', hp: 200, maxHp: 200, isOpen: false, repairPlanks: 2, repairNails: 4, chunkKey: key },
       { id: `wall_${key}_s2`, x: hx + 180, y: hy + hh - 16, width: 120, height: 16, type: 'wall_wood', name: 'Timber Wall', hp: 250, maxHp: 250, repairPlanks: 3, repairNails: 4, chunkKey: key },
-      { id: `wall_${key}_w`, x: hx, y: hy + 16, width: 16, height: hh - 32, type: 'wall_wood', name: 'Timber Wall', hp: 250, maxHp: 250, repairPlanks: 3, repairNails: 4, chunkKey: key },
+      { id: `wall_${key}_w`, x: hx, y: hy + 16, width: 16, height: hh - 32, type: 'wall_brick', name: 'Red Brick Wall', hp: 400, maxHp: 400, chunkKey: key },
       { id: `wall_${key}_e`, x: hx + hw - 16, y: hy + 16, width: 16, height: hh - 32, type: 'wall_wood', name: 'Timber Wall', hp: 250, maxHp: 250, repairPlanks: 3, repairNails: 4, chunkKey: key }
     );
+
+    // Abandoned car in driveway (Tempered Crowbar dismantles for Iron Pipes!)
+    structures.push({
+      id: `car_${key}`,
+      x: hx + hw + 20,
+      y: hy + 70,
+      width: 70,
+      height: 36,
+      type: 'abandoned_car',
+      name: rng() < 0.5 ? 'Abandoned Sedan' : 'Rusted Station Wagon',
+      hp: 350,
+      maxHp: 350,
+      chunkKey: key,
+    });
+
+    // Utility Pole along front road (Motorized Saw fells for Treated Planks!)
+    structures.push({
+      id: `pole_${key}`,
+      x: hx - 60,
+      y: hy + hh + 40,
+      width: 20,
+      height: 20,
+      type: 'utility_pole',
+      name: 'Creosote Utility Pole',
+      hp: 220,
+      maxHp: 220,
+      chunkKey: key,
+    });
+
+    // Concrete Home Foundation slab (Sledgehammer smashes for Concrete Mix!)
+    structures.push({
+      id: `foundation_${key}`,
+      x: hx - 90,
+      y: hy + 60,
+      width: 65,
+      height: 32,
+      type: 'home_foundation',
+      name: 'Concrete Home Foundation',
+      hp: 380,
+      maxHp: 380,
+      chunkKey: key,
+    });
 
     // Interior furniture & pantry
     structures.push(
@@ -452,6 +536,22 @@ export function generateChunk(
         containedLoot: [
           { id: `loot_can_${key}_1`, name: 'Canned Beef Chili', category: 'food', nutrition: 35, hydration: 10, count: 2, weight: 0.5, description: 'Hearty preserved chili.' },
           { id: `loot_water_${key}_1`, name: 'Clean Water Bottle', category: 'drink', hydration: 50, count: 2, weight: 1.0, description: 'Potable fresh water.' },
+        ],
+      },
+      {
+        id: `toolbox_${key}`,
+        x: hx + 40,
+        y: hy + 105,
+        width: 44,
+        height: 28,
+        type: 'loot_container',
+        name: 'Tool Box',
+        hp: 150,
+        maxHp: 150,
+        chunkKey: key,
+        containedLoot: [
+          { id: `scrap_steel_${key}_1`, name: 'Scrap Steel', category: 'resource', count: 2, weight: 1.0, description: 'Dense scrap steel plates and structural salvage.' },
+          { id: `box_nails_${key}_1`, name: 'Box of Nails', category: 'resource', count: 2, weight: 0.4, description: 'Steel construction nails essential for carpentry and scrap tools.' },
         ],
       }
     );
@@ -527,7 +627,7 @@ export function generateChunk(
         maxHp: 180,
         chunkKey: key,
         containedLoot: [
-          { id: `loot_planks_${key}`, name: 'Wood Planks', category: 'resource', count: 8, weight: 3.5, description: 'Heavy timber boards.' },
+          { id: `simple_wood_plank_${key}`, name: 'Simple Wood Planks', category: 'resource', count: 8, weight: 3.5, description: 'Heavy timber boards.' },
           { id: `loot_nails_${key}`, name: 'Box of Nails', category: 'resource', count: 18, weight: 0.8, description: 'Framing nails.' },
         ],
       },
@@ -547,7 +647,59 @@ export function generateChunk(
           { id: `loot_shield_${key}`, name: 'Improvised Wood Shield', category: 'weapon', weaponType: 'shield', blockDefense: 0.85, durability: 75, maxDurability: 75, weight: 2.2, description: 'Blocks 85% damage.' },
         ],
       },
-      { id: `bench_${key}`, x: sx + 140, y: sy + 40, width: 55, height: 35, type: 'workbench', name: 'Store Demonstration Workbench', hp: 300, maxHp: 300, chunkKey: key }
+      {
+        id: `toolbox_${key}`,
+        x: sx + 120,
+        y: sy + 40,
+        width: 44,
+        height: 28,
+        type: 'loot_container',
+        name: 'Tool Box',
+        hp: 150,
+        maxHp: 150,
+        chunkKey: key,
+        containedLoot: [
+          { id: `scrap_steel_${key}_1`, name: 'Scrap Steel', category: 'resource', count: 2, weight: 1.0, description: 'Dense scrap steel plates and structural salvage.' },
+          { id: `box_nails_${key}_1`, name: 'Box of Nails', category: 'resource', count: 2, weight: 0.4, description: 'Steel construction nails essential for carpentry and scrap tools.' },
+        ],
+      },
+      { id: `bench_${key}`, x: sx + 180, y: sy + 40, width: 55, height: 35, type: 'workbench', name: 'Store Demonstration Workbench', hp: 300, maxHp: 300, chunkKey: key },
+      {
+        id: `car_hw_${key}`,
+        x: sx + 50,
+        y: sy + sh + 25,
+        width: 72,
+        height: 36,
+        type: 'abandoned_car',
+        name: 'Derelict Pickup Truck',
+        hp: 350,
+        maxHp: 350,
+        chunkKey: key,
+      },
+      {
+        id: `vault_hw_${key}`,
+        x: sx + sw - 70,
+        y: sy + 120,
+        width: 48,
+        height: 44,
+        type: 'bank_vault',
+        name: 'Heavy Industrial Steel Safe',
+        hp: 500,
+        maxHp: 500,
+        chunkKey: key,
+      },
+      {
+        id: `pole_hw_${key}`,
+        x: sx - 40,
+        y: sy + sh + 30,
+        width: 20,
+        height: 20,
+        type: 'utility_pole',
+        name: 'Commercial Utility Pole',
+        hp: 250,
+        maxHp: 250,
+        chunkKey: key,
+      }
     );
 
     // 35% chance of stranded Carpenter survivor!
@@ -672,20 +824,32 @@ export function generateChunk(
       { id: `wall_${key}_w`, x: px, y: py + 16, width: 16, height: ph - 32, type: 'wall_wood_reinforced', name: 'Reinforced Wall', hp: 500, maxHp: 500, chunkKey: key },
       { id: `wall_${key}_e`, x: px + pw - 16, y: py + 16, width: 16, height: ph - 32, type: 'wall_wood_reinforced', name: 'Reinforced Wall', hp: 500, maxHp: 500, chunkKey: key },
       {
-        id: `armory_locker_${key}`,
+        id: `toolbox_${key}`,
         x: px + 40,
         y: py + 40,
         width: 75,
         height: 35,
         type: 'loot_container',
-        name: 'Munitions Lockbox',
+        name: 'Tool Box',
         hp: 300,
         maxHp: 300,
         chunkKey: key,
         containedLoot: [
-          { id: `loot_pipe_shotgun_${key}`, name: 'Improvised 12g Shotgun', category: 'weapon', weaponType: 'gun', ammoType: '12g Buckshot Shells', damage: 90, reach: 160, noise: 95, weight: 3.2, durability: 80, maxDurability: 80, description: 'Single barrel pipe shotgun.' },
-          { id: `loot_ammo_${key}`, name: '12g Buckshot Shells', category: 'resource', count: 12, weight: 0.8, description: 'Buckshot shells.' },
+          { id: `scrap_steel_${key}_1`, name: 'Scrap Steel', category: 'resource', count: 2, weight: 1.0, description: 'Dense scrap steel plates and structural salvage.' },
+          { id: `box_nails_${key}_1`, name: 'Box of Nails', category: 'resource', count: 2, weight: 0.4, description: 'Steel construction nails essential for carpentry and scrap tools.' },
         ],
+      },
+      {
+        id: `vault_armory_${key}`,
+        x: px + pw - 65,
+        y: py + 40,
+        width: 48,
+        height: 44,
+        type: 'bank_vault',
+        name: 'Armored Evidence Bank Vault',
+        hp: 550,
+        maxHp: 550,
+        chunkKey: key,
       }
     );
 
@@ -740,7 +904,19 @@ export function generateChunk(
     // Fencing around orchard
     structures.push(
       { id: `fence_farm_${key}_1`, x: baseX + 40, y: baseY + 40, width: CHUNK_SIZE - 80, height: 12, type: 'fence_wood', name: 'Orchard Picket Fence', hp: 150, maxHp: 150, repairPlanks: 1, repairNails: 2, chunkKey: key },
-      { id: `fence_farm_${key}_2`, x: baseX + 40, y: baseY + 40, width: 12, height: CHUNK_SIZE - 80, type: 'fence_wood', name: 'Orchard Picket Fence', hp: 150, maxHp: 150, repairPlanks: 1, repairNails: 2, chunkKey: key }
+      { id: `fence_farm_${key}_2`, x: baseX + 40, y: baseY + 40, width: 12, height: CHUNK_SIZE - 80, type: 'fence_wood', name: 'Orchard Picket Fence', hp: 150, maxHp: 150, repairPlanks: 1, repairNails: 2, chunkKey: key },
+      {
+        id: `clay_farm_${key}`,
+        x: baseX + 80,
+        y: baseY + CHUNK_SIZE - 120,
+        width: 44,
+        height: 44,
+        type: 'riverbed_clay',
+        name: 'Irrigation Canal Clay Deposit',
+        hp: 120,
+        maxHp: 120,
+        chunkKey: key,
+      }
     );
 
     // Outdoor zombies wandering along farm edges
@@ -824,6 +1000,23 @@ export function generateChunk(
         biteChance: 0.2,
       });
     }
+  }
+
+  // 1-2 pieces of Scrap Wood scattered outside on the ground to pick up
+  const scrapWoodCount = 1 + Math.floor(rng() * 2);
+  for (let i = 0; i < scrapWoodCount; i++) {
+    structures.push({
+      id: `ground_scrap_${key}_${i}`,
+      x: baseX + 80 + Math.floor(rng() * (CHUNK_SIZE - 160)),
+      y: baseY + 80 + Math.floor(rng() * (CHUNK_SIZE - 160)),
+      width: 22,
+      height: 20,
+      type: 'ground_scrap_wood',
+      name: 'Scrap Wood',
+      hp: 1,
+      maxHp: 1,
+      chunkKey: key,
+    });
   }
 
   return {

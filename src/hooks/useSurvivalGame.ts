@@ -22,6 +22,8 @@ import {
   getDayNightInfo,
   SleepBlackoutState,
   HomeBase,
+  SaveSlotData,
+  SpeechBubble,
 } from '../types/game';
 import { generateDeterministicObservationLog } from '../utils/deterministicNarrator';
 import { soundManager } from '../utils/audio';
@@ -46,6 +48,124 @@ export const getDistToBox = (px: number, py: number, bx: number, by: number, bw:
   return Math.hypot(px - nearestX, py - nearestY);
 };
 
+export interface ZombieEvolutionMultipliers {
+  speedMult: number;
+  healthMult: number;
+  damageMult: number;
+  spawnRateMult: number;
+  sightMult: number;
+  hearingMult: number;
+  smellMult: number;
+  populationMult: number;
+}
+
+// Odds of rain: 10% base + 1% per day/sleep, capped at 40% (0.40)
+export const getRainChance = (day: number): number => {
+  return Math.min(0.40, 0.10 + Math.max(0, day - 1) * 0.01);
+};
+
+// Persistent PC cookie storage for individual computer high score
+export const getCookie = (name: string): string | null => {
+  if (typeof document === 'undefined') return null;
+  const match = document.cookie.match(new RegExp('(^|;\\s*)' + name + '=([^;]+)'));
+  return match ? decodeURIComponent(match[2]) : null;
+};
+
+export const setCookie = (name: string, value: string, days = 3650) => {
+  if (typeof document === 'undefined') return;
+  const expires = new Date(Date.now() + days * 864e5).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+};
+
+// Respawn zombies outside the current Home Base sector with compounding population multiplier
+export const respawnZombiesOutsideHomeSector = (
+  prevZombies: Zombie[],
+  homeSecX: number,
+  homeSecY: number,
+  allStructures: WorldStructure[],
+  allBuildings: BuildingBounds[],
+  playerX: number,
+  playerY: number,
+  multipliers: ZombieEvolutionMultipliers
+): Zombie[] => {
+  // 1. Keep alive any zombies that are strictly inside the Home Base sector (home sector stays cleared)
+  const homeZombies = prevZombies
+    .filter(
+      (z) =>
+        z.hp > 0 &&
+        Math.floor(z.x / 800) === homeSecX &&
+        Math.floor(z.y / 800) === homeSecY
+    )
+    .map((z) => ({
+      ...z,
+      speed: z.speed * 1.02,
+      maxHp: Math.round(z.maxHp * 1.02),
+      hp: Math.min(Math.round(z.maxHp * 1.02), z.hp + 5),
+    }));
+
+  // 2. Desired target zombies outside the home sector (26 base * populationMult)
+  const baseCountOutside = 26;
+  const targetOutsideCount = Math.min(80, Math.round(baseCountOutside * multipliers.populationMult));
+
+  const newOutsideZombies: Zombie[] = [];
+  const zTypes: Zombie['type'][] = ['walker', 'shambler', 'crawler', 'bloated'];
+
+  for (let i = 0; i < targetOutsideCount; i++) {
+    let spawnX = 0;
+    let spawnY = 0;
+    let foundValid = false;
+
+    for (let attempts = 0; attempts < 20; attempts++) {
+      // Pick random coordinates across surrounding sectors (offset -2 to +2 sectors)
+      const secOffsetX = Math.floor(Math.random() * 5) - 2;
+      const secOffsetY = Math.floor(Math.random() * 5) - 2;
+      const targetSecX = homeSecX + secOffsetX;
+      const targetSecY = homeSecY + secOffsetY;
+
+      // STRICTLY EXCLUDE CURRENT HOME BASE SECTOR!
+      if (targetSecX === homeSecX && targetSecY === homeSecY) continue;
+
+      const candX = targetSecX * 800 + 40 + Math.random() * 720;
+      const candY = targetSecY * 800 + 40 + Math.random() * 720;
+
+      // Must be outside enclosed buildings and outside safe fenced compounds
+      if (isPointInsideBuilding(candX, candY, allBuildings, 10)) continue;
+      if (isPointInsideFencedOrSafeZone(candX, candY, allStructures, 15)) continue;
+
+      // Ensure minimum distance from player (at least 220px away)
+      if (Math.hypot(candX - playerX, candY - playerY) < 220) continue;
+
+      spawnX = candX;
+      spawnY = candY;
+      foundValid = true;
+      break;
+    }
+
+    if (foundValid) {
+      const zType = zTypes[Math.floor(Math.random() * zTypes.length)];
+      const scaledHp = Math.round(
+        (zType === 'shambler' ? 60 : zType === 'bloated' ? 58 : 50) * multipliers.healthMult
+      );
+      const scaledSpeed = (0.38 + Math.random() * 0.12) * multipliers.speedMult;
+      newOutsideZombies.push({
+        id: `respawn_z_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+        x: spawnX,
+        y: spawnY,
+        angle: Math.random() * Math.PI * 2,
+        hp: scaledHp,
+        maxHp: scaledHp,
+        speed: scaledSpeed,
+        state: 'wandering',
+        type: zType,
+        clothingColor: Math.random() < 0.5 ? '#475569' : '#334155',
+        biteChance: zType === 'bloated' ? 0.28 : 0.20,
+      });
+    }
+  }
+
+  return [...homeZombies, ...newOutsideZombies];
+};
+
 const INITIAL_SURVIVOR: Survivor = {
   name: 'Subject #704 (James Miller)',
   x: 480,
@@ -64,46 +184,10 @@ const INITIAL_SURVIVOR: Survivor = {
   virusProgress: 0,
   injuries: [],
 
-  // Dedicated Equipment: Weapon 1, Backup Weapon 2, Tool 1
-  equippedWeapon: {
-    id: 'crowbar_init',
-    name: 'Heavy Steel Crowbar',
-    category: 'weapon',
-    weaponType: 'melee',
-    description: 'Pries doors and crushes skulls with minimal maintenance.',
-    weight: 2.0,
-    durability: 88,
-    maxDurability: 100,
-    damage: 35,
-    noise: 18,
-    reach: 55,
-  },
-  equippedWeapon2: {
-    id: 'pipe_shotgun_init',
-    name: 'Improvised 12g Shotgun',
-    category: 'weapon',
-    weaponType: 'gun',
-    ammoType: '12g Buckshot Shells',
-    description: 'Single-barrel pipe shotgun. Thunderous 95dB blast.',
-    weight: 3.2,
-    durability: 75,
-    maxDurability: 80,
-    damage: 90,
-    noise: 95,
-    reach: 160,
-  },
-  equippedTool: {
-    id: 'hammer_init',
-    name: 'Hammer',
-    category: 'tool',
-    weaponType: 'melee',
-    description: 'Essential for driving nails, constructing, and tearing down walls for wood & nails.',
-    weight: 1.2,
-    durability: 94,
-    maxDurability: 100,
-    damage: 20,
-    noise: 15,
-  },
+  // Dedicated Equipment: Start barehanded!
+  equippedWeapon: null,
+  equippedWeapon2: null,
+  equippedTool: null,
   activeSlot: 'weapon1',
 
   // Equipped Armor: Head, Chest, Legs, Gloves, Footwear
@@ -173,135 +257,7 @@ const INITIAL_SURVIVOR: Survivor = {
   isSleeping: false,
   isBlocking: false,
 
-  inventory: [
-    {
-      id: 'inv_shotgun_shells',
-      name: '12g Buckshot Shells',
-      category: 'resource',
-      description: 'Ammunition for the 12g Pipe Shotgun.',
-      weight: 0.6,
-      count: 8,
-    },
-    {
-      id: 'inv_wood_shield',
-      name: 'Improvised Wood Shield',
-      category: 'weapon',
-      weaponType: 'shield',
-      blockDefense: 0.85,
-      description: 'Left-click while in hand to block 85% damage and deflect bites.',
-      weight: 2.2,
-      durability: 70,
-      maxDurability: 70,
-      damage: 12,
-      noise: 8,
-    },
-    {
-      id: 'inv_planks',
-      name: 'Wood Planks',
-      category: 'resource',
-      description: 'Sturdy pine boards for shelter walls, doors, and barricades.',
-      weight: 3.0,
-      count: 9,
-    },
-    {
-      id: 'inv_nails',
-      name: 'Box of Nails',
-      category: 'resource',
-      description: 'Framing nails essential for carpentry and barricades.',
-      weight: 0.8,
-      count: 16,
-    },
-    {
-      id: 'inv_wall_kit',
-      name: 'Pine Wall Frame',
-      category: 'structure_kit',
-      description: 'Crafted wall kit. Select in inventory then left-click map to place.',
-      weight: 3.5,
-      isPlaceable: true,
-      placeStructureType: 'wall_wood',
-      placeWidth: 65,
-      placeHeight: 16,
-      count: 2,
-    },
-    {
-      id: 'inv_canned_stew',
-      name: 'Canned Beef Chili',
-      category: 'food',
-      description: 'Preserved hearty chili rations. Restores +35% Satiety.',
-      weight: 0.5,
-      nutrition: 35,
-      hydration: 10,
-      count: 2,
-    },
-    {
-      id: 'inv_baked_beans',
-      name: 'Canned Baked Beans',
-      category: 'food',
-      description: 'High-protein navy beans in tomato sauce. Restores +30% Satiety.',
-      weight: 0.4,
-      nutrition: 30,
-      hydration: 5,
-      count: 2,
-    },
-    {
-      id: 'inv_beef_jerky',
-      name: 'Dried Beef Jerky',
-      category: 'food',
-      description: 'Smoked preserved beef strip. Restores +25% Satiety.',
-      weight: 0.2,
-      nutrition: 25,
-      count: 2,
-    },
-    {
-      id: 'inv_canteen',
-      name: 'Refillable Military Canteen',
-      category: 'drink',
-      description: 'Rugged military canteen. Holds water and can be refilled at any rain barrel [E] (50 refills per full barrel).',
-      weight: 0.6,
-      hydration: 35,
-      isRefillable: true,
-      currentSips: 10,
-      maxSips: 10,
-      count: 1,
-    },
-    {
-      id: 'inv_water_bottle',
-      name: 'Clean Water Bottle',
-      category: 'drink',
-      description: 'Potable tap water collected before the grid pressure dropped. Restores +50% Hydration.',
-      weight: 1.0,
-      hydration: 50,
-      count: 2,
-    },
-    {
-      id: 'inv_lemon_soda',
-      name: 'Lemon Soda Can',
-      category: 'drink',
-      description: 'Carbonated soda. Restores +35% Hydration and +10% Satiety.',
-      weight: 0.35,
-      hydration: 35,
-      nutrition: 10,
-      count: 2,
-    },
-    {
-      id: 'inv_sterile_gauze',
-      name: 'Sterile Gauze Bandage',
-      category: 'medical',
-      description: 'Surgical cotton wrap to arrest arterial bleeding.',
-      weight: 0.1,
-      healValue: 25,
-      count: 2,
-      isSterile: true,
-    },
-    {
-      id: 'inv_scrap',
-      name: 'Scrap Metal',
-      category: 'resource',
-      description: 'Sheet iron scrap for pipes, firearms, and workbench fixtures.',
-      weight: 2.0,
-      count: 4,
-    },
-  ],
+  inventory: [],
   maxCarryWeight: 26,
   flashlightOn: false,
   isSneaking: false,
@@ -326,11 +282,25 @@ const INITIAL_STRUCTURES: WorldStructure[] = [
   { id: 'fence_yard_e', x: 668, y: 155, width: 12, height: 355, type: 'fence_wood', name: 'Safehouse Wood Fence', hp: 150, maxHp: 150, repairPlanks: 1, repairNails: 2 },
   // Garden Berry Bush
   { id: 'fruit_yard_init', x: 305, y: 180, width: 36, height: 36, type: 'fruit_bush', name: 'Garden Blackberry Bush', hp: 60, maxHp: 60, fruitCount: 3, maxFruit: 3, lastHarvestTime: Date.now(), fruitType: 'Garden Blackberries' },
+  // Tier 2 World Harvest Nodes in Sector [0, 0]
+  { id: 'car_base_road', x: 180, y: 55, width: 72, height: 36, type: 'abandoned_car', name: 'Abandoned Station Wagon', hp: 350, maxHp: 350 },
+  { id: 'riverbed_clay_base', x: 130, y: 470, width: 44, height: 44, type: 'riverbed_clay', name: 'Riverbed Clay Deposit', hp: 120, maxHp: 120 },
+  { id: 'wall_brick_base', x: 280, y: 420, width: 14, height: 90, type: 'wall_brick', name: 'Weathered Red Brick Wall', hp: 400, maxHp: 400 },
+  // Tier 3 Industrial Harvest Nodes in Sector [0, 0]
+  { id: 'utility_pole_base', x: 270, y: 55, width: 20, height: 20, type: 'utility_pole', name: 'Roadside Utility Pole', hp: 200, maxHp: 200 },
+  { id: 'home_foundation_base', x: 620, y: 460, width: 80, height: 28, type: 'home_foundation', name: 'Concrete Home Foundation', hp: 350, maxHp: 350 },
+  { id: 'bank_vault_base', x: 690, y: 310, width: 50, height: 45, type: 'bank_vault', name: 'Reinforced Heavy Bank Vault', hp: 500, maxHp: 500 },
+  { id: 'boulder_rock_base', x: 170, y: 220, width: 44, height: 40, type: 'boulder_rock', name: 'Granite Quarry Boulder', hp: 300, maxHp: 300 },
   // Furniture
   { id: 'furn_bed', x: 370, y: 245, width: 55, height: 75, type: 'bed', name: 'Sturdy Wooden Cot Bed', hp: 100, maxHp: 100 },
   { id: 'furn_workbench', x: 535, y: 245, width: 55, height: 45, type: 'workbench', name: 'Carpentry Workbench', hp: 180, maxHp: 180 },
   { id: 'furn_table', x: 450, y: 330, width: 50, height: 40, type: 'table_chair', name: 'Dining Table & Chair', hp: 80, maxHp: 80 },
+  { id: 'furn_tv', x: 450, y: 236, width: 36, height: 26, type: 'tv_set', name: 'Flickering CRT Television', hp: 100, maxHp: 100 },
   { id: 'furn_stove', x: 370, y: 400, width: 45, height: 45, type: 'kitchen_stove', name: 'Field Kitchen Firebox', hp: 120, maxHp: 120, isLit: false },
+  // Ground Scrap Wood scattered in the yard
+  { id: 'scrap_wood_yard_1', x: 260, y: 220, width: 22, height: 20, type: 'ground_scrap_wood', name: 'Scrap Wood', hp: 1, maxHp: 1 },
+  { id: 'scrap_wood_yard_2', x: 720, y: 240, width: 22, height: 20, type: 'ground_scrap_wood', name: 'Scrap Wood', hp: 1, maxHp: 1 },
+  { id: 'scrap_wood_yard_3', x: 390, y: 520, width: 22, height: 20, type: 'ground_scrap_wood', name: 'Scrap Wood', hp: 1, maxHp: 1 },
   // Colony Storage Chest (Drop food & drinks here for survivors)
   {
     id: 'chest_base_1',
@@ -432,7 +402,7 @@ export function useSurvivalGame() {
     const initSec = 360; // 6 mins into 40m daylight
     const info = getDayNightInfo(initSec);
     return {
-      day: 5,
+      day: 1,
       timeMinutes: Math.round(info.inGameMinutesOfDay),
       cycleSeconds: initSec,
       isDay: info.isDay,
@@ -484,20 +454,67 @@ export function useSurvivalGame() {
   const [sleepBlackout, setSleepBlackout] = useState<SleepBlackoutState | null>(null);
 
   // Hidden compounding zombie evolution multiplier (2% per sleep day reset, 10% on passing out)
-  // Not revealed in any tutorial or interface per specifications
-  const zombieMultiplierRef = useRef<{ speedMult: number; healthMult: number }>({ speedMult: 1.0, healthMult: 1.0 });
+  // Tracks: speed, health, attack damage, spawn rate, sight range, hearing range, sense of smell, and outside horde population
+  const zombieMultiplierRef = useRef<ZombieEvolutionMultipliers>({
+    speedMult: 1.0,
+    healthMult: 1.0,
+    damageMult: 1.0,
+    spawnRateMult: 1.0,
+    sightMult: 1.0,
+    hearingMult: 1.0,
+    smellMult: 1.0,
+    populationMult: 1.0,
+  });
 
   // High score tracking: Longest Survived Days (the primary goal & score!)
+  // Tied strictly to the individual computer playing via localStorage and browser cookie.
+  // Anyone that plays starts with a zero day record unless their computer remembers loading this game.
   const HIGH_SCORE_STORAGE_KEY = 'charval_longest_survived_days';
-  const LEGACY_HIGH_SCORE_STORAGE_KEY = 'knox_longest_survived_days';
+  const COOKIE_SCORE_KEY = 'charval_zombie_record';
   const [highScoreDays, setHighScoreDays] = useState<number>(() => {
     try {
-      const saved = localStorage.getItem(HIGH_SCORE_STORAGE_KEY) || localStorage.getItem(LEGACY_HIGH_SCORE_STORAGE_KEY);
-      return saved ? parseFloat(saved) : 5;
+      const savedLocal = localStorage.getItem(HIGH_SCORE_STORAGE_KEY);
+      if (savedLocal !== null && savedLocal !== '') {
+        const parsed = parseInt(savedLocal, 10);
+        if (!isNaN(parsed) && parsed >= 0) return parsed;
+      }
+      const savedCookie = getCookie(COOKIE_SCORE_KEY);
+      if (savedCookie !== null && savedCookie !== '') {
+        const parsed = parseInt(savedCookie, 10);
+        if (!isNaN(parsed) && parsed >= 0) return parsed;
+      }
+      return 0; // Starts with a zero day record for any new computer
     } catch {
-      return 5;
+      return 0;
     }
   });
+
+  const recordHighScore = useCallback((days: number) => {
+    const valid = Math.max(0, Math.floor(days));
+    if (valid > highScoreDaysRef.current) {
+      highScoreDaysRef.current = valid;
+      setHighScoreDays(valid);
+      try {
+        localStorage.setItem(HIGH_SCORE_STORAGE_KEY, String(valid));
+        setCookie(COOKIE_SCORE_KEY, String(valid));
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  // Helper to check if the survivor owns any matching tool in inventory or equipped gear.
+  // All tools work immediately once crafted without requiring manual slot selection.
+  const playerOwnsTool = useCallback((predicate: (name: string, id: string) => boolean): boolean => {
+    const s = survivorRef.current;
+    const allItems = [
+      s.equippedTool,
+      s.equippedWeapon,
+      s.equippedWeapon2,
+      ...s.inventory,
+    ].filter(Boolean) as Item[];
+    return allItems.some((i) => predicate(i.name.toLowerCase(), i.id.toLowerCase()));
+  }, []);
 
   // References
   const survivorRef = useRef(survivor);
@@ -526,6 +543,31 @@ export function useSurvivalGame() {
   activeChestRef.current = activeChest;
   const highScoreDaysRef = useRef(highScoreDays);
   highScoreDaysRef.current = highScoreDays;
+
+  // Survivor Speech Bubble (story beats, spoken observations)
+  const [speechBubble, setSpeechBubble] = useState<SpeechBubble | null>(null);
+  const hasTriggeredToolboxSpeechRef = useRef<boolean>(false);
+
+  const triggerSurvivorSpeech = useCallback((text: string, durationMs: number = 8000) => {
+    setSpeechBubble({
+      text,
+      expiresAt: Date.now() + durationMs,
+      speaker: 'James',
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!speechBubble) return;
+    const remaining = speechBubble.expiresAt - Date.now();
+    if (remaining <= 0) {
+      setSpeechBubble(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setSpeechBubble(null);
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [speechBubble]);
 
   const triggerAnimation = useCallback((effect: Omit<VisualAnimationEffect, 'id' | 'createdAt'>) => {
     const newEff: VisualAnimationEffect = {
@@ -936,28 +978,44 @@ export function useSurvivalGame() {
     if (!nearest.struct) return null;
     const s = nearest.struct;
 
-    let actionLabel = 'Interact [F]';
-    if (s.type === 'door_wood') {
-      actionLabel = s.isOpen ? 'Close Door [F]' : 'Open Door [F]';
+    let actionLabel = 'Interact [Right-Click / F]';
+    if (s.type === 'door_wood' || s.type === 'door_stone') {
+      actionLabel = s.isOpen ? `Close ${s.name} [Right-Click / F]` : `Open ${s.name} [Right-Click / F]`;
+    } else if (s.type === 'wall_brick') {
+      actionLabel = `Demolish Brick Wall (Claw Hammer) -> Stone Blocks [Right-Click / F]`;
+    } else if (s.type === 'abandoned_car') {
+      actionLabel = `Pry Vehicle (Tempered Crowbar) -> Iron Pipes [Right-Click / F]`;
+    } else if (s.type === 'riverbed_clay') {
+      actionLabel = `Excavate Clay (Steel Spade) -> Dense Clay [Right-Click / F]`;
+    } else if (s.type === 'trap_clay_pit') {
+      actionLabel = `Dense Clay Pit Trap (Mires & Slows Undead -65%)`;
+    } else if (s.type === 'trap_barbed_wire') {
+      actionLabel = `Barbed Wire Barrier (Contact Damage & -50% Slow)`;
+    } else if (s.type === 'wall_stone') {
+      actionLabel = `Reinforced Stone Wall (${s.hp}/${s.maxHp} HP)`;
     } else if (s.type === 'workbench') {
-      actionLabel = 'Craft at Workbench [F] · [Click]';
+      actionLabel = 'Craft at Workbench [Right-Click / F]';
     } else if (s.type === 'bed') {
-      actionLabel = 'Sleep on Cot Bed [F]';
+      actionLabel = survivor.fatigue < 50 ? 'Sleep on Cot Bed [F] (Not Tired: requires ≥50% Fatigue)' : 'Sleep on Cot Bed [Right-Click / F]';
     } else if (s.type === 'sleeping_mat') {
-      actionLabel = 'Sleep on Mat [F]';
+      actionLabel = survivor.fatigue < 50 ? 'Sleep on Mat [F] (Not Tired: requires ≥50% Fatigue)' : 'Sleep on Mat [Right-Click / F]';
     } else if (s.type === 'kitchen_stove') {
-      actionLabel = 'Kitchen Stove [F] · [Click]';
+      actionLabel = 'Kitchen Stove [Right-Click / F]';
     } else if (s.type === 'table_chair') {
-      actionLabel = 'Sit at Table & Read [F]';
+      actionLabel = 'Sit at Table & Read [Right-Click / F]';
     } else if (s.type === 'tree') {
-      actionLabel = `Chop Tree (${s.hp}/${s.maxHp} HP) [F]`;
+      actionLabel = `Cut Tree (${s.hp}/${s.maxHp} HP) [Iron Saw: Hardwood Logs | Scrap Saw: Planks]`;
     } else if (s.type === 'loot_container') {
       const isChest = s.name.toLowerCase().includes('chest');
-      actionLabel = isChest ? `Open ${s.name} [F] · [Click]` : (s.containedLoot && s.containedLoot.length > 0 ? `Search ${s.name} [F] · [Click]` : `Store in ${s.name} [F] · [Click]`);
+      actionLabel = isChest ? `Open ${s.name} [Right-Click / F]` : `Loot / Breakdown for Metal Strips (Bent Crowbar) [Right-Click]`;
+    } else if (s.type === 'dirt_trench') {
+      actionLabel = `Dirt Trench (Slows Undead -25%)`;
+    } else if (s.type === 'fence_wood' || s.type === 'fence_wire') {
+      actionLabel = `Knock Down Fence (Scrap Hammer) [Right-Click] · Vault [E/F]`;
     } else if (s.type === 'rain_collector') {
-      actionLabel = `Rain Barrel (${s.waterStored || 0}/50 Refills) [F]`;
+      actionLabel = `Rain Barrel (${s.waterStored || 0}/50 Refills) [Right-Click / F]`;
     } else if (s.type === 'campfire') {
-      actionLabel = 'Campfire [F] · [Click]';
+      actionLabel = 'Campfire [Right-Click / F]';
     }
 
     return {
@@ -968,26 +1026,20 @@ export function useSurvivalGame() {
       y: s.y + s.height / 2,
       type: s.type,
     };
-  }, [structures, survivor.x, survivor.y, survivor.isSleeping, survivor.sleepingStructureId, npcs]);
+  }, [structures, survivor.x, survivor.y, survivor.isSleeping, survivor.sleepingStructureId, survivor.fatigue, npcs]);
 
-  // Cycle Active Slot with mouse scroll wheel: Weapon 1 <-> Backup Weapon 2 <-> Tool 1
+  // Cycle Active Weapon Slot with mouse scroll wheel: Weapon 1 (Primary) <-> Weapon 2 (Backup)
+  // All tools work immediately when interacting without needing manual slot selection.
   const cycleActiveSlot = useCallback((delta: number) => {
     soundManager.playTerminalBlip();
     setSurvivor((prev) => {
-      const slots: ActiveHandSlot[] = ['weapon1', 'weapon2', 'tool'];
+      const slots: ActiveHandSlot[] = ['weapon1', 'weapon2'];
       const currentIndex = slots.indexOf(prev.activeSlot);
-      let nextIndex = (currentIndex + (delta > 0 ? 1 : -1)) % slots.length;
-      if (nextIndex < 0) nextIndex = slots.length - 1;
+      let nextIndex = currentIndex === -1 ? 0 : (currentIndex + (delta > 0 ? 1 : -1) + slots.length) % slots.length;
       const nextSlot = slots[nextIndex];
 
-      const itemInHand =
-        nextSlot === 'weapon1'
-          ? prev.equippedWeapon
-          : nextSlot === 'weapon2'
-          ? prev.equippedWeapon2
-          : prev.equippedTool;
-
-      setSystemMessage(`Equipped Hand: ${nextSlot.toUpperCase()} (${itemInHand?.name || 'Empty'})`);
+      const itemInHand = nextSlot === 'weapon1' ? prev.equippedWeapon : prev.equippedWeapon2;
+      setSystemMessage(`Equipped: ${nextSlot === 'weapon1' ? 'Primary' : 'Backup'} (${itemInHand?.name || 'Fists'})`);
 
       return {
         ...prev,
@@ -1309,6 +1361,14 @@ export function useSurvivalGame() {
 
   // Voluntary Sleep in bed: Screen blacks out, wakes up at morning daylight, compounds 2%
   const startSleeping = useCallback((structure: WorldStructure) => {
+    // Player cannot sleep unless fatigue is at least 50%
+    if (survivorRef.current.fatigue < 50) {
+      triggerSurvivorSpeech("I am not tired.", 5000);
+      setSystemMessage("Cannot sleep: You are not tired enough (requires at least 50% fatigue).");
+      soundManager.playTerminalBlip();
+      return;
+    }
+
     soundManager.playHeartbeat();
     const currEnv = environmentRef.current;
     const nextDay = currEnv.day + 1;
@@ -1339,25 +1399,53 @@ export function useSurvivalGame() {
       // Advance environment to next day, 07:00 AM bright daylight
       const morningCycleSec = 180;
       const info = getDayNightInfo(morningCycleSec);
+
+      // Odds of rain: 10% + 1% per day/sleep, max 40%
+      const rainChance = getRainChance(nextDay);
+      const isRaining = Math.random() < rainChance;
+      const newWeather: EnvironmentState['weather'] = isRaining
+        ? (Math.random() < 0.65 ? 'Heavy Rain' : 'Thunderstorm')
+        : (['Fog', 'Overcast', 'Clear Cold'] as EnvironmentState['weather'][])[Math.floor(Math.random() * 3)];
+      soundManager.setWeatherAmbience(newWeather);
+
       setEnvironment((prev) => ({
         ...prev,
-        day: prev.day + 1,
+        day: nextDay,
         cycleSeconds: morningCycleSec,
         timeMinutes: Math.round(info.inGameMinutesOfDay),
         isDay: true,
         cycleRemainingMinutes: info.remainingMinutes,
+        weather: newWeather,
       }));
 
-      // Compounding 2% zombie speed & 2% health
-      zombieMultiplierRef.current.speedMult *= 1.02;
-      zombieMultiplierRef.current.healthMult *= 1.02;
+      // Update computer-bound high score record
+      recordHighScore(nextDay);
+
+      // Compounding 2% zombie evolution across all attributes per sleep
+      const mult = zombieMultiplierRef.current;
+      mult.speedMult *= 1.02;
+      mult.healthMult *= 1.02;
+      mult.damageMult *= 1.02;
+      mult.spawnRateMult *= 1.02;
+      mult.sightMult *= 1.02;
+      mult.hearingMult *= 1.02;
+      mult.smellMult *= 1.02;
+      mult.populationMult *= 1.02;
+
+      // Respawn zombies outside current Home Base sector with 2% more of them!
+      const base = homeBaseRef.current;
+      const p = survivorRef.current;
       setZombies((prevZombies) =>
-        prevZombies.map((z) => ({
-          ...z,
-          speed: z.speed * 1.02,
-          maxHp: Math.round(z.maxHp * 1.02),
-          hp: Math.round(z.hp * 1.02),
-        }))
+        respawnZombiesOutsideHomeSector(
+          prevZombies,
+          base.sectorX,
+          base.sectorY,
+          structuresRef.current,
+          buildingsRef.current,
+          p.x,
+          p.y,
+          mult
+        )
       );
 
       // Restore survivor
@@ -1369,6 +1457,44 @@ export function useSurvivalGame() {
         hp: Math.min(100, s.hp + 20),
         injuries: s.injuries.map((inj) => (inj.bleeding && inj.bandaged ? { ...inj, bleeding: false } : inj)),
       }));
+
+      // Update colony survivors: stick to Home Base sector; sleep if bed exists, otherwise stay awake
+      setNpcs((prevNpcs) => {
+        const baseBeds = structuresRef.current.filter(
+          (st) =>
+            (st.type === 'bed' || st.type === 'sleeping_mat') &&
+            Math.floor(st.x / 800) === base.sectorX &&
+            Math.floor(st.y / 800) === base.sectorY
+        );
+        const hasBed = baseBeds.length > 0;
+
+        return prevNpcs.map((n, idx) => {
+          if (n.state !== 'recruited' || n.assignedTask === 'follow') return n;
+
+          if (hasBed) {
+            const bed = baseBeds[idx % baseBeds.length];
+            return {
+              ...n,
+              x: bed.x + bed.width / 2,
+              y: bed.y + bed.height / 2,
+              targetX: bed.x + bed.width / 2,
+              targetY: bed.y + bed.height / 2,
+              fatigue: 0,
+              hp: Math.min(n.maxHp, n.hp + 25),
+            };
+          } else {
+            // No bed at base sector: "if there is no bed they don't get to sleep!"
+            return {
+              ...n,
+              x: base.x + ((idx % 2 === 0 ? 1 : -1) * 35),
+              y: base.y + ((idx > 1 ? 1 : -1) * 35),
+              targetX: base.x + ((idx % 2 === 0 ? 1 : -1) * 35),
+              targetY: base.y + ((idx > 1 ? 1 : -1) * 35),
+              fatigue: Math.min(100, (n.fatigue ?? 0) + 10), // Did not get to sleep
+            };
+          }
+        });
+      });
 
       // Party member periodic discussion every 5th day
       if (nextDay % 5 === 0) {
@@ -1393,7 +1519,7 @@ export function useSurvivalGame() {
     setTimeout(() => {
       setSleepBlackout(null);
     }, 3200);
-  }, [triggerEvolutionChatter]);
+  }, [recordHighScore, triggerEvolutionChatter, triggerSurvivorSpeech]);
 
   // Collapse / Pass out from exhaustion after 5 minutes of consciousness slipping
   const passOutFromExhaustion = useCallback(() => {
@@ -1408,8 +1534,8 @@ export function useSurvivalGame() {
       isPointInsideBuilding(curr.x, curr.y, buildingsRef.current, 10) ||
       isPointInsideFencedOrSafeZone(curr.x, curr.y, structuresRef.current, 15);
 
-    // 30% chance of waking up infected if NOT inside!
-    const rolledInfection = !isInside && Math.random() < 0.30;
+    // 5% chance of waking up infected if NOT inside! (Reduced from 30% to 5%)
+    const rolledInfection = !isInside && Math.random() < 0.05;
 
     setSleepBlackout({
       active: true,
@@ -1435,25 +1561,53 @@ export function useSurvivalGame() {
       // Advance environment to Day + 1, 07:00 AM bright daylight
       const morningCycleSec = 180;
       const info = getDayNightInfo(morningCycleSec);
+
+      // Odds of rain: 10% + 1% per day/sleep, max 40%
+      const rainChance = getRainChance(nextDay);
+      const isRaining = Math.random() < rainChance;
+      const newWeather: EnvironmentState['weather'] = isRaining
+        ? (Math.random() < 0.65 ? 'Heavy Rain' : 'Thunderstorm')
+        : (['Fog', 'Overcast', 'Clear Cold'] as EnvironmentState['weather'][])[Math.floor(Math.random() * 3)];
+      soundManager.setWeatherAmbience(newWeather);
+
       setEnvironment((prev) => ({
         ...prev,
-        day: prev.day + 1,
+        day: nextDay,
         cycleSeconds: morningCycleSec,
         timeMinutes: Math.round(info.inGameMinutesOfDay),
         isDay: true,
         cycleRemainingMinutes: info.remainingMinutes,
+        weather: newWeather,
       }));
 
-      // Compounding 10% on passing out!
-      zombieMultiplierRef.current.speedMult *= 1.10;
-      zombieMultiplierRef.current.healthMult *= 1.10;
+      // Update computer-bound high score record
+      recordHighScore(nextDay);
+
+      // Compounding 10% on passing out across all attributes!
+      const mult = zombieMultiplierRef.current;
+      mult.speedMult *= 1.10;
+      mult.healthMult *= 1.10;
+      mult.damageMult *= 1.10;
+      mult.spawnRateMult *= 1.10;
+      mult.sightMult *= 1.10;
+      mult.hearingMult *= 1.10;
+      mult.smellMult *= 1.10;
+      mult.populationMult *= 1.10;
+
+      // Respawn zombies outside current Home Base sector (+10% more outside)
+      const base = homeBaseRef.current;
+      const p = survivorRef.current;
       setZombies((prevZombies) =>
-        prevZombies.map((z) => ({
-          ...z,
-          speed: z.speed * 1.10,
-          maxHp: Math.round(z.maxHp * 1.10),
-          hp: Math.round(z.hp * 1.10),
-        }))
+        respawnZombiesOutsideHomeSector(
+          prevZombies,
+          base.sectorX,
+          base.sectorY,
+          structuresRef.current,
+          buildingsRef.current,
+          p.x,
+          p.y,
+          mult
+        )
       );
 
       // Restore survivor fatigue & handle infection
@@ -1489,6 +1643,44 @@ export function useSurvivalGame() {
         };
       });
 
+      // Update colony survivors: stick to Home Base sector; sleep if bed exists, otherwise stay awake
+      setNpcs((prevNpcs) => {
+        const baseBeds = structuresRef.current.filter(
+          (st) =>
+            (st.type === 'bed' || st.type === 'sleeping_mat') &&
+            Math.floor(st.x / 800) === base.sectorX &&
+            Math.floor(st.y / 800) === base.sectorY
+        );
+        const hasBed = baseBeds.length > 0;
+
+        return prevNpcs.map((n, idx) => {
+          if (n.state !== 'recruited' || n.assignedTask === 'follow') return n;
+
+          if (hasBed) {
+            const bed = baseBeds[idx % baseBeds.length];
+            return {
+              ...n,
+              x: bed.x + bed.width / 2,
+              y: bed.y + bed.height / 2,
+              targetX: bed.x + bed.width / 2,
+              targetY: bed.y + bed.height / 2,
+              fatigue: 0,
+              hp: Math.min(n.maxHp, n.hp + 20),
+            };
+          } else {
+            // No bed at base sector: "if there is no bed they don't get to sleep!"
+            return {
+              ...n,
+              x: base.x + ((idx % 2 === 0 ? 1 : -1) * 35),
+              y: base.y + ((idx > 1 ? 1 : -1) * 35),
+              targetX: base.x + ((idx % 2 === 0 ? 1 : -1) * 35),
+              targetY: base.y + ((idx > 1 ? 1 : -1) * 35),
+              fatigue: Math.min(100, (n.fatigue ?? 0) + 10), // Did not get to sleep
+            };
+          }
+        });
+      });
+
       if (rolledInfection) {
         soundManager.playZombieGrowl();
         soundManager.playAlarmBeep();
@@ -1516,7 +1708,7 @@ export function useSurvivalGame() {
     setTimeout(() => {
       setSleepBlackout(null);
     }, 3400);
-  }, [triggerEvolutionChatter]);
+  }, [recordHighScore, triggerEvolutionChatter]);
 
   const wakeUp = useCallback(() => {
     soundManager.playTerminalBlip();
@@ -1636,23 +1828,15 @@ export function useSurvivalGame() {
         }
 
         // High score point tracking: Longest Survived is the goal!
-        if (newDay > highScoreDaysRef.current) {
-          setHighScoreDays(newDay);
-          try {
-            localStorage.setItem(HIGH_SCORE_STORAGE_KEY, newDay.toString());
-          } catch {
-            // ignore
-          }
-        }
+        recordHighScore(newDay);
 
         const info = getDayNightInfo(newCycleSec);
 
         let weather = prev.weather;
-        // Weather shift roll: 1 in 7 (1d7) chance of rain!
-        // Rolling 1 on a 7-sided die triggers downpour rain or thunderstorm
-        if (Math.random() < 0.018) {
-          const d7 = Math.floor(Math.random() * 7) + 1; // 1 to 7
-          if (d7 === 1) {
+        // Weather shift roll: odds it will rain is 10% + 1% more per day/sleep until it hits a 40% chance
+        if (Math.random() < 0.015) {
+          const rainChance = getRainChance(newDay);
+          if (Math.random() < rainChance) {
             weather = Math.random() < 0.65 ? 'Heavy Rain' : 'Thunderstorm';
           } else {
             const dryWeathers: EnvironmentState['weather'][] = ['Fog', 'Overcast', 'Clear Cold'];
@@ -1832,11 +2016,16 @@ export function useSurvivalGame() {
             let targetY = z.targetY ?? z.y;
             let newState = z.state;
 
-            const sightRadius = s.flashlightOn ? 280 : isDaytime ? 140 : 200;
+            const zMult = zombieMultiplierRef.current;
+            const baseSightRadius = s.flashlightOn ? 280 : isDaytime ? 140 : 200;
+            const sightRadius = baseSightRadius * zMult.sightMult;
+            const bloodSmellRadius = 240 * zMult.smellMult;
+            const generalScentRadius = 75 * zMult.smellMult;
             const detectsBySight = distToSurvivor < sightRadius && !s.isSleeping;
-            const detectsByBlood = s.injuries.some((i) => i.bleeding) && distToSurvivor < 240;
+            const detectsByBlood = s.injuries.some((i) => i.bleeding) && distToSurvivor < bloodSmellRadius;
+            const detectsByScent = distToSurvivor < generalScentRadius && !s.isSleeping;
 
-            if (detectsBySight || detectsByBlood) {
+            if (detectsBySight || detectsByBlood || detectsByScent) {
               newState = 'tracking';
               targetX = s.x;
               targetY = s.y;
@@ -1888,17 +2077,19 @@ export function useSurvivalGame() {
                 }
               }
             } else {
-              // NIGHTTIME BEHAVIOR: Roam freely, pursue acoustic sound heatmap
+              // NIGHTTIME BEHAVIOR: Roam freely, pursue acoustic sound heatmap with hearing range multiplier
               const zCol = Math.floor(z.x / 20);
               const zRow = Math.floor(z.y / 20);
-              let peakHeat = 0.2;
+              const hearingRange = Math.min(14, Math.max(4, Math.round(6 * zMult.hearingMult)));
+              const minHeatThreshold = Math.max(0.08, 0.20 / zMult.hearingMult);
+              let peakHeat = minHeatThreshold;
               let bestCol = -1;
               let bestRow = -1;
 
-              for (let dr = -6; dr <= 6; dr++) {
+              for (let dr = -hearingRange; dr <= hearingRange; dr++) {
                 const r = zRow + dr;
                 if (r < 0 || r >= GRID_ROWS) continue;
-                for (let dc = -6; dc <= 6; dc++) {
+                for (let dc = -hearingRange; dc <= hearingRange; dc++) {
                   const c = zCol + dc;
                   if (c < 0 || c >= GRID_COLS) continue;
                   const heat = currHeatmap[r]?.[c] || 0;
@@ -1926,8 +2117,12 @@ export function useSurvivalGame() {
           });
       });
 
-      // 5. Periodic Zombie Spawning strictly outside buildings and fenced safe zones
-      if (Math.random() < 0.12 && zombiesRef.current.length < 28) {
+      // 5. Periodic Zombie Spawning strictly outside buildings and fenced safe zones (scaling with spawnRateMult & populationMult)
+      const zMult = zombieMultiplierRef.current;
+      const baseSpawnChance = 0.12;
+      const scaledSpawnChance = Math.min(0.60, baseSpawnChance * zMult.spawnRateMult);
+      const maxZombieCap = Math.min(65, Math.round(28 * zMult.populationMult));
+      if (Math.random() < scaledSpawnChance && zombiesRef.current.length < maxZombieCap) {
         const s = survivorRef.current;
         const validLoc = getValidZombieSpawnLocation(
           s.x,
@@ -2200,7 +2395,13 @@ export function useSurvivalGame() {
 
           // TASK: REST / SLEEP (Must sleep at new base; if no bed in base sector, they do NOT sleep)
           if (npc.assignedTask === 'rest') {
-            if (hasBaseBed) {
+            const isInBaseSector =
+              Math.floor(npc.x / 800) === base.sectorX && Math.floor(npc.y / 800) === base.sectorY;
+
+            if (!isInBaseSector) {
+              targetX = base.x;
+              targetY = base.y;
+            } else if (hasBaseBed) {
               const assignedBed = baseBeds[npcIdx % baseBeds.length];
               targetX = assignedBed.x + assignedBed.width / 2;
               targetY = assignedBed.y + assignedBed.height / 2;
@@ -2297,119 +2498,141 @@ export function useSurvivalGame() {
               targetY = s.y - Math.sin(s.angle) * 35;
             }
           } else if (npc.assignedTask === 'patrol') {
-            // TASK: PATROL (Patrol strictly the Home Base sector and eliminate any zombies in that sector)
-            const baseZombie = currZombies.find(
-              (z) =>
-                z.hp > 0 &&
-                ((Math.floor(z.x / 800) === base.sectorX && Math.floor(z.y / 800) === base.sectorY) ||
-                  Math.hypot(z.x - base.x, z.y - base.y) < 380)
-            );
+            // TASK: PATROL (Patrol strictly the Home Base sector and eliminate any zombies strictly in that sector)
+            const isInBaseSector =
+              Math.floor(npc.x / 800) === base.sectorX && Math.floor(npc.y / 800) === base.sectorY;
 
-            if (baseZombie) {
-              targetX = baseZombie.x;
-              targetY = baseZombie.y;
-              const zDist = Math.hypot(baseZombie.x - npc.x, baseZombie.y - npc.y);
-              const isGun = npc.equippedWeapon?.weaponType === 'gun';
-              const reach = isGun ? 160 : 45;
-
-              if (zDist <= reach) {
-                const dmg = npc.equippedWeapon?.damage || 30;
-                if (isGun) {
-                  soundManager.playMeleeHit(true);
-                  emitSound(npc.x, npc.y, 250, 85, `${npc.name} Patrol Shot`);
-                  triggerAnimation({
-                    type: 'gunshot',
-                    x: npc.x,
-                    y: npc.y,
-                    angle: Math.atan2(baseZombie.y - npc.y, baseZombie.x - npc.x),
-                    durationMs: 200,
-                  });
-                } else {
-                  soundManager.playMeleeHit(false);
-                  triggerAnimation({
-                    type: 'melee_swing',
-                    x: npc.x,
-                    y: npc.y,
-                    angle: Math.atan2(baseZombie.y - npc.y, baseZombie.x - npc.x),
-                    durationMs: 250,
-                  });
-                }
-
-                triggerAnimation({
-                  type: 'floating_text',
-                  x: baseZombie.x,
-                  y: baseZombie.y - 14,
-                  angle: 0,
-                  text: `PATROL: -${dmg} HP`,
-                  color: '#ef4444',
-                  durationMs: 900,
-                });
-
-                setZombies((allZ) =>
-                  allZ
-                    .map((z) => (z.id === baseZombie.id ? { ...z, hp: z.hp - dmg } : z))
-                    .filter((z) => z.hp > 0)
-                );
-              }
+            if (!isInBaseSector) {
+              // Priority: Return directly to Home Base sector!
+              targetX = base.x;
+              targetY = base.y;
             } else {
-              // Patrol waypoints around perimeter of the current Home Base sector
-              const pRadiusX = 140;
-              const pRadiusY = 100;
-              const waypoints = [
-                { x: base.x - pRadiusX, y: base.y - pRadiusY },
-                { x: base.x + pRadiusX, y: base.y - pRadiusY },
-                { x: base.x + pRadiusX, y: base.y + pRadiusY },
-                { x: base.x - pRadiusX, y: base.y + pRadiusY },
-              ];
-              const wpIndex = (Math.floor(Date.now() / 6000) + npcIdx) % waypoints.length;
-              targetX = waypoints[wpIndex].x;
-              targetY = waypoints[wpIndex].y;
+              const baseZombie = currZombies.find(
+                (z) =>
+                  z.hp > 0 &&
+                  Math.floor(z.x / 800) === base.sectorX &&
+                  Math.floor(z.y / 800) === base.sectorY
+              );
+
+              if (baseZombie) {
+                targetX = baseZombie.x;
+                targetY = baseZombie.y;
+                const zDist = Math.hypot(baseZombie.x - npc.x, baseZombie.y - npc.y);
+                const isGun = npc.equippedWeapon?.weaponType === 'gun';
+                const reach = isGun ? 160 : 45;
+
+                if (zDist <= reach) {
+                  const dmg = npc.equippedWeapon?.damage || 30;
+                  if (isGun) {
+                    soundManager.playMeleeHit(true);
+                    emitSound(npc.x, npc.y, 250, 85, `${npc.name} Patrol Shot`);
+                    triggerAnimation({
+                      type: 'gunshot',
+                      x: npc.x,
+                      y: npc.y,
+                      angle: Math.atan2(baseZombie.y - npc.y, baseZombie.x - npc.x),
+                      durationMs: 200,
+                    });
+                  } else {
+                    soundManager.playMeleeHit(false);
+                    triggerAnimation({
+                      type: 'melee_swing',
+                      x: npc.x,
+                      y: npc.y,
+                      angle: Math.atan2(baseZombie.y - npc.y, baseZombie.x - npc.x),
+                      durationMs: 250,
+                    });
+                  }
+
+                  triggerAnimation({
+                    type: 'floating_text',
+                    x: baseZombie.x,
+                    y: baseZombie.y - 14,
+                    angle: 0,
+                    text: `PATROL: -${dmg} HP`,
+                    color: '#ef4444',
+                    durationMs: 900,
+                  });
+
+                  setZombies((allZ) =>
+                    allZ
+                      .map((z) => (z.id === baseZombie.id ? { ...z, hp: z.hp - dmg } : z))
+                      .filter((z) => z.hp > 0)
+                  );
+                }
+              } else {
+                // Patrol waypoints clamped strictly within the Home Base sector
+                const secMinX = base.sectorX * 800 + 80;
+                const secMaxX = base.sectorX * 800 + 720;
+                const secMinY = base.sectorY * 800 + 80;
+                const secMaxY = base.sectorY * 800 + 720;
+                const pRadiusX = 140;
+                const pRadiusY = 100;
+                const waypoints = [
+                  { x: Math.max(secMinX, Math.min(secMaxX, base.x - pRadiusX)), y: Math.max(secMinY, Math.min(secMaxY, base.y - pRadiusY)) },
+                  { x: Math.max(secMinX, Math.min(secMaxX, base.x + pRadiusX)), y: Math.max(secMinY, Math.min(secMaxY, base.y - pRadiusY)) },
+                  { x: Math.max(secMinX, Math.min(secMaxX, base.x + pRadiusX)), y: Math.max(secMinY, Math.min(secMaxY, base.y + pRadiusY)) },
+                  { x: Math.max(secMinX, Math.min(secMaxX, base.x - pRadiusX)), y: Math.max(secMinY, Math.min(secMaxY, base.y + pRadiusY)) },
+                ];
+                const wpIndex = (Math.floor(Date.now() / 6000) + npcIdx) % waypoints.length;
+                targetX = waypoints[wpIndex].x;
+                targetY = waypoints[wpIndex].y;
+              }
             }
           } else if (npc.assignedTask === 'maintain') {
-            // TASK: MAINTAIN (Only repair structures within the Home Base sector: pre-existing structures and anything player built there)
-            const damaged = currStructures.find(
-              (st) =>
-                st.hp < st.maxHp &&
-                Math.floor(st.x / 800) === base.sectorX &&
-                Math.floor(st.y / 800) === base.sectorY &&
-                (st.type.includes('wall') || st.type.includes('fence') || st.type === 'door_wood' || st.type === 'barricade_window')
-            );
+            // TASK: MAINTAIN (Only repair structures strictly within the Home Base sector: pre-existing structures and anything player built there)
+            const isInBaseSector =
+              Math.floor(npc.x / 800) === base.sectorX && Math.floor(npc.y / 800) === base.sectorY;
 
-            if (damaged) {
-              targetX = damaged.x + damaged.width / 2;
-              targetY = damaged.y + damaged.height / 2;
-              const sDist = Math.hypot(targetX - npc.x, targetY - npc.y);
-
-              if (sDist <= 55) {
-                soundManager.playHammerSound();
-                triggerAnimation({
-                  type: 'tool_hammer',
-                  x: targetX,
-                  y: targetY,
-                  angle: 0,
-                  durationMs: 350,
-                });
-                triggerAnimation({
-                  type: 'floating_text',
-                  x: targetX,
-                  y: targetY - 14,
-                  angle: 0,
-                  text: `REPAIRED +35 HP`,
-                  color: '#10b981',
-                  durationMs: 900,
-                });
-
-                setStructures((allS) =>
-                  allS.map((st) =>
-                    st.id === damaged.id ? { ...st, hp: Math.min(st.maxHp, st.hp + 35) } : st
-                  )
-                );
-              }
+            if (!isInBaseSector) {
+              // Return directly to Home Base sector!
+              targetX = base.x;
+              targetY = base.y;
             } else {
-              // Return to Home Base location when all structures in home sector are fully repaired
-              const offsetSeed = parseInt(npc.id.replace(/\D/g, '') || '1', 10);
-              targetX = base.x + Math.sin(Date.now() / 3500 + offsetSeed) * 35;
-              targetY = base.y + Math.cos(Date.now() / 3500 + offsetSeed) * 35;
+              const damaged = currStructures.find(
+                (st) =>
+                  st.hp < st.maxHp &&
+                  Math.floor(st.x / 800) === base.sectorX &&
+                  Math.floor(st.y / 800) === base.sectorY &&
+                  (st.type.includes('wall') || st.type.includes('fence') || st.type.includes('door') || st.type === 'barricade_window')
+              );
+
+              if (damaged) {
+                targetX = damaged.x + damaged.width / 2;
+                targetY = damaged.y + damaged.height / 2;
+                const sDist = Math.hypot(targetX - npc.x, targetY - npc.y);
+
+                if (sDist <= 55) {
+                  soundManager.playHammerSound();
+                  triggerAnimation({
+                    type: 'tool_hammer',
+                    x: targetX,
+                    y: targetY,
+                    angle: 0,
+                    durationMs: 350,
+                  });
+                  triggerAnimation({
+                    type: 'floating_text',
+                    x: targetX,
+                    y: targetY - 14,
+                    angle: 0,
+                    text: `REPAIRED +35 HP`,
+                    color: '#10b981',
+                    durationMs: 900,
+                  });
+
+                  setStructures((allS) =>
+                    allS.map((st) =>
+                      st.id === damaged.id ? { ...st, hp: Math.min(st.maxHp, st.hp + 35) } : st
+                    )
+                  );
+                }
+              } else {
+                // Return to Home Base location strictly inside base sector when all structures are fully repaired
+                const offsetSeed = parseInt(npc.id.replace(/\D/g, '') || '1', 10);
+                targetX = base.x + Math.sin(Date.now() / 3500 + offsetSeed) * 35;
+                targetY = base.y + Math.cos(Date.now() / 3500 + offsetSeed) * 35;
+              }
             }
           }
 
@@ -2449,6 +2672,7 @@ export function useSurvivalGame() {
           let angle = z.angle;
           let nextX = z.x;
           let nextY = z.y;
+          let currentZombieHp = z.hp;
 
           if (newState === 'tracking') {
             const dx = targetX - z.x;
@@ -2462,13 +2686,147 @@ export function useSurvivalGame() {
               const currWeatherNow = environmentRef.current.weather;
               const isRainingNow = currWeatherNow === 'Heavy Rain' || currWeatherNow === 'Thunderstorm' || currWeatherNow === 'Freezing Rain';
               const baseDist = isRainingNow ? 1.65 : 1.1;
-              const moveDist = baseDist * (z.speed ? z.speed / 0.42 : 1) * zombieMultiplierRef.current.speedMult;
+              // Dirt trenches slow zombies by 25%
+              const isInTrench = currStructures.some(
+                (st) =>
+                  st.type === 'dirt_trench' &&
+                  z.x >= st.x - 4 &&
+                  z.x <= st.x + st.width + 4 &&
+                  z.y >= st.y - 4 &&
+                  z.y <= st.y + st.height + 4
+              );
+              // Tier 2 Clay Pit slows zombies severely by 65%!
+              const isInClayPit = currStructures.some(
+                (st) =>
+                  st.type === 'trap_clay_pit' &&
+                  z.x >= st.x - 4 &&
+                  z.x <= st.x + st.width + 4 &&
+                  z.y >= st.y - 4 &&
+                  z.y <= st.y + st.height + 4
+              );
+              // Tier 2 Barbed wire slows zombies by 50% and deals contact damage!
+              const touchingBarbedWire = currStructures.find(
+                (st) =>
+                  st.type === 'trap_barbed_wire' &&
+                  z.x >= st.x - 4 &&
+                  z.x <= st.x + st.width + 4 &&
+                  z.y >= st.y - 4 &&
+                  z.y <= st.y + st.height + 4
+              );
+              // Tier 3 Acid Pit slows zombies by 60% and deals 25 continuous chemical damage!
+              const touchingAcidPit = currStructures.find(
+                (st) =>
+                  st.type === 'trap_acid_pit' &&
+                  z.x >= st.x - 4 &&
+                  z.x <= st.x + st.width + 4 &&
+                  z.y >= st.y - 4 &&
+                  z.y <= st.y + st.height + 4
+              );
+              // Tier 3 Shredder slows zombies by 70% and deals 35 contact damage!
+              const touchingShredder = currStructures.find(
+                (st) =>
+                  st.type === 'trap_shredder' &&
+                  z.x >= st.x - 4 &&
+                  z.x <= st.x + st.width + 4 &&
+                  z.y >= st.y - 4 &&
+                  z.y <= st.y + st.height + 4
+              );
+
+              const trenchSpeedMod = touchingShredder ? 0.30 : isInClayPit ? 0.35 : touchingAcidPit ? 0.40 : touchingBarbedWire ? 0.50 : isInTrench ? 0.75 : 1.0;
+
+              if (touchingAcidPit && Math.random() < 0.20) {
+                const acidDmg = 25;
+                currentZombieHp = Math.max(0, currentZombieHp - acidDmg);
+                soundManager.playWaterSplash();
+                triggerAnimation({
+                  type: 'spark',
+                  x: z.x,
+                  y: z.y,
+                  angle: angle,
+                  durationMs: 300,
+                });
+                triggerAnimation({
+                  type: 'floating_text',
+                  x: z.x,
+                  y: z.y - 14,
+                  angle: 0,
+                  text: '-25 HP (ACID PIT)',
+                  color: '#22c55e',
+                  durationMs: 700,
+                });
+              }
+
+              if (touchingShredder && Math.random() < 0.20) {
+                const shredDmg = 35;
+                currentZombieHp = Math.max(0, currentZombieHp - shredDmg);
+                soundManager.playMeleeHit(false);
+                setBloodSplats((b) => [
+                  ...b.slice(-25),
+                  { x: z.x, y: z.y, radius: 12, intensity: 0.9 },
+                ]);
+                triggerAnimation({
+                  type: 'spark',
+                  x: z.x,
+                  y: z.y,
+                  angle: angle,
+                  durationMs: 250,
+                });
+                triggerAnimation({
+                  type: 'floating_text',
+                  x: z.x,
+                  y: z.y - 14,
+                  angle: 0,
+                  text: '-35 HP (SHREDDER)',
+                  color: '#ef4444',
+                  durationMs: 700,
+                });
+              }
+
+              if (touchingBarbedWire && Math.random() < 0.14) {
+                const wireDmg = 8;
+                currentZombieHp = Math.max(0, currentZombieHp - wireDmg);
+                soundManager.playMeleeHit(false);
+                setBloodSplats((b) => [
+                  ...b.slice(-25),
+                  { x: z.x, y: z.y, radius: 10, intensity: 0.8 },
+                ]);
+                triggerAnimation({
+                  type: 'spark',
+                  x: z.x,
+                  y: z.y,
+                  angle: angle,
+                  durationMs: 200,
+                });
+                triggerAnimation({
+                  type: 'floating_text',
+                  x: z.x,
+                  y: z.y - 12,
+                  angle: 0,
+                  text: '-8 HP (BARBED WIRE)',
+                  color: '#ef4444',
+                  durationMs: 700,
+                });
+              }
+
+              const moveDist = baseDist * (z.speed ? z.speed / 0.42 : 1) * zombieMultiplierRef.current.speedMult * trenchSpeedMod;
               const testX = z.x + Math.cos(angle) * moveDist;
               const testY = z.y + Math.sin(angle) * moveDist;
 
               const collides = currStructures.some((st) => {
-                if (st.type === 'tree' || st.type === 'table_chair' || st.type === 'bed' || st.type === 'sleeping_mat') return false;
-                if (st.type === 'door_wood' && st.isOpen) return false;
+                if (
+                  st.type === 'tree' ||
+                  st.type === 'table_chair' ||
+                  st.type === 'bed' ||
+                  st.type === 'sleeping_mat' ||
+                  st.type === 'dirt_trench' ||
+                  st.type === 'trap_clay_pit' ||
+                  st.type === 'trap_barbed_wire' ||
+                  st.type === 'trap_acid_pit' ||
+                  st.type === 'trap_shredder' ||
+                  st.type === 'ground_scrap_wood' ||
+                  st.type === 'riverbed_clay'
+                ) return false;
+                if ((st.type === 'door_wood' || st.type === 'door_stone' || st.type === 'door_steel') && st.isOpen) return false;
                 return testX >= st.x && testX <= st.x + st.width && testY >= st.y && testY <= st.y + st.height;
               });
 
@@ -2488,7 +2846,8 @@ export function useSurvivalGame() {
                           testY >= st.y - 10 &&
                           testY <= st.y + st.height + 10
                         ) {
-                          const newHp = st.hp - 2;
+                          const wallDmg = Math.max(1, Math.round(2 * zombieMultiplierRef.current.damageMult));
+                          const newHp = st.hp - wallDmg;
                           triggerAnimation({
                             type: 'spark',
                             x: testX,
@@ -2496,7 +2855,7 @@ export function useSurvivalGame() {
                             angle: angle,
                             durationMs: 250,
                           });
-                          if (newHp <= 0 && st.type === 'door_wood') {
+                          if (newHp <= 0 && (st.type === 'door_wood' || st.type === 'door_stone' || st.type === 'door_steel')) {
                             soundManager.playHammerSound();
                             setSystemMessage(`⚠️ ${st.name} was broken down by shamblers!`);
                             return { ...st, hp: 0, isOpen: true };
@@ -2505,7 +2864,7 @@ export function useSurvivalGame() {
                         }
                         return st;
                       })
-                      .filter((st) => st.type === 'door_wood' || st.hp > 0)
+                      .filter((st) => st.type === 'door_wood' || st.type === 'door_stone' || st.type === 'door_steel' || st.hp > 0)
                   );
                 }
               }
@@ -2540,8 +2899,9 @@ export function useSurvivalGame() {
                 return z;
               }
 
-              // Base damage reduced by armor
-              const baseDmg = 12;
+              // Base damage scaled with compounding 2% / 10% evolution damage multiplier
+              const zDmgMult = zombieMultiplierRef.current.damageMult;
+              const baseDmg = Math.round(12 * zDmgMult);
               const mitigatedDmg = Math.round(baseDmg * (1 - Math.min(0.65, totalArmorDefense)));
 
               const roll = Math.random();
@@ -2604,7 +2964,7 @@ export function useSurvivalGame() {
                     durationMs: 1400,
                   });
                   setSurvivor((prev) => {
-                    const finalHp = Math.max(0, prev.hp - 16);
+                    const finalHp = Math.max(0, prev.hp - Math.round(16 * zDmgMult));
                     if (finalHp <= 0) {
                       setIsGameOver(true);
                       setDeathCause('KILLED BY THE UNDEAD: Sustained fatal bite trauma.');
@@ -2697,7 +3057,7 @@ export function useSurvivalGame() {
             if (Math.random() < 0.01) angle += (Math.random() - 0.5) * 0.6;
           }
 
-          return { ...z, x: nextX, y: nextY, angle, state: newState };
+          return { ...z, hp: currentZombieHp, x: nextX, y: nextY, angle, state: newState };
         });
       });
 
@@ -2714,8 +3074,12 @@ export function useSurvivalGame() {
           const dy = n.targetY - n.y;
           const dist = Math.hypot(dx, dy);
           if (dist > 8) {
-            // If following player and far behind, sprint to catch up!
-            const effectiveSpeed = (n.assignedTask === 'follow' && dist > 110)
+            // If following player and far behind, or returning to Home Base from afar, sprint to reach base quickly
+            const base = homeBaseRef.current;
+            const isReturningToBase =
+              n.assignedTask !== 'follow' &&
+              (dist > 90 || Math.floor(n.x / 800) !== base.sectorX || Math.floor(n.y / 800) !== base.sectorY);
+            const effectiveSpeed = ((n.assignedTask === 'follow' && dist > 110) || isReturningToBase)
               ? (isRainingNow2 ? 3.8 * 0.75 : 3.8)
               : npcWalkSpeed;
             const step = Math.min(dist, effectiveSpeed);
@@ -2742,7 +3106,7 @@ export function useSurvivalGame() {
       clearInterval(interval);
       clearInterval(movementInterval);
     };
-  }, [triggerAnimation]);
+  }, [recordHighScore, triggerAnimation]);
 
   // Movement
   const moveSurvivor = useCallback(
@@ -2774,12 +3138,19 @@ export function useSurvivalGame() {
             s.type === 'bed' ||
             s.type === 'sleeping_mat' ||
             s.type === 'fruit_bush' ||
-            s.type === 'campfire'
+            s.type === 'campfire' ||
+            s.type === 'dirt_trench' ||
+            s.type === 'trap_clay_pit' ||
+            s.type === 'trap_barbed_wire' ||
+            s.type === 'riverbed_clay' ||
+            s.type === 'ground_scrap_wood' ||
+            s.type === 'trap_acid_pit' ||
+            s.type === 'trap_shredder'
           ) {
             return false;
           }
           // Open doors are never solid obstacles
-          if (s.type === 'door_wood' && s.isOpen) {
+          if ((s.type === 'door_wood' || s.type === 'door_stone' || s.type === 'door_steel') && s.isOpen) {
             return false;
           }
           return true;
@@ -2795,12 +3166,17 @@ export function useSurvivalGame() {
             s.type === 'workbench' ||
             s.type === 'kitchen_stove' ||
             s.type === 'loot_container' ||
-            s.type === 'rain_collector'
+            s.type === 'rain_collector' ||
+            s.type === 'abandoned_car' ||
+            s.type === 'bank_vault' ||
+            s.type === 'home_foundation' ||
+            s.type === 'boulder_rock' ||
+            s.type === 'utility_pole'
           ) {
-            bx += 5;
-            by += 5;
-            bw = Math.max(4, bw - 10);
-            bh = Math.max(4, bh - 10);
+            bx += 3;
+            by += 3;
+            bw = Math.max(4, bw - 6);
+            bh = Math.max(4, bh - 6);
           }
           return { bx, by, bw, bh };
         };
@@ -2935,6 +3311,53 @@ export function useSurvivalGame() {
 
         const angle = dx !== 0 || dy !== 0 ? Math.atan2(dy, dx) : prev.angle;
 
+        // Auto-collect scrap wood on the ground when the player walks over it
+        const nearbyScrapWood = currStructures.filter(
+          (s) => s.type === 'ground_scrap_wood' && Math.hypot(s.x + s.width / 2 - resolvedX, s.y + s.height / 2 - resolvedY) <= 30
+        );
+        if (nearbyScrapWood.length > 0) {
+          const collectedIds = new Set(nearbyScrapWood.map((w) => w.id));
+          const totalYield = nearbyScrapWood.length * 2;
+          setStructures((prevList) => prevList.filter((s) => !collectedIds.has(s.id)));
+          soundManager.playItemPickup();
+          triggerAnimation({
+            type: 'floating_text',
+            x: resolvedX,
+            y: resolvedY - 20,
+            angle: 0,
+            text: `+${totalYield} SCRAP WOOD (AUTO-COLLECTED)`,
+            color: '#f59e0b',
+            durationMs: 1200,
+          });
+          setSystemMessage(`Auto-collected ${totalYield} Scrap Wood.`);
+
+          const newInv = [...prev.inventory];
+          const woodItem = newInv.find((i) => i.id === 'inv_scrap_wood' || i.name.toLowerCase().includes('scrap wood'));
+          if (woodItem) {
+            woodItem.count = (woodItem.count ?? 1) + totalYield;
+          } else {
+            newInv.push({
+              id: 'inv_scrap_wood',
+              name: 'Scrap Wood',
+              category: 'resource',
+              description: 'Salvaged wooden boards and sturdy branches for workbench tool crafting.',
+              weight: 0.6,
+              count: totalYield,
+            });
+          }
+
+          return {
+            ...prev,
+            x: resolvedX,
+            y: resolvedY,
+            angle,
+            isRunning: running,
+            isSneaking: sneaking,
+            isBlocking: false,
+            inventory: newInv,
+          };
+        }
+
         return {
           ...prev,
           x: resolvedX,
@@ -2946,20 +3369,12 @@ export function useSurvivalGame() {
         };
       });
     },
-    [emitSound, updateProceduralChunks]
+    [emitSound, triggerAnimation, updateProceduralChunks]
   );
 
-  // Left Click Action: Handles Placement / Looting / Workbench / Kitchen / Shoot / Block / Attack depending on target and active slot!
+  // Left Click Action: ATTACK ONLY! (Fists Strike / Melee Swing / Gunshot / Shield Block)
   const handlePrimaryAction = useCallback(
-    (
-      targetWorldX: number,
-      targetWorldY: number,
-      options?: {
-        onOpenWorkbench?: () => void;
-        onOpenKitchen?: () => void;
-        onOpenChest?: (chest: WorldStructure) => void;
-      }
-    ) => {
+    (targetWorldX: number, targetWorldY: number) => {
       if (isGameOverRef.current) return;
 
       // 1. If in Placement Mode -> Left Click Places Structure!
@@ -2974,86 +3389,6 @@ export function useSurvivalGame() {
         return;
       }
 
-      // 2. Click to trigger Looting on loot containers & storage chests within reach
-      const clickedContainer = structuresRef.current.find((s) => {
-        if (s.type !== 'loot_container') return false;
-        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
-        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
-        return dClick <= 40 && dPlayer <= 110;
-      });
-
-      if (clickedContainer) {
-        soundManager.playChestSound();
-        if (options?.onOpenChest) {
-          options.onOpenChest(clickedContainer);
-        } else {
-          setActiveChest(clickedContainer);
-        }
-        triggerAnimation({
-          type: 'floating_text',
-          x: clickedContainer.x + clickedContainer.width / 2,
-          y: clickedContainer.y - 12,
-          angle: 0,
-          text: 'LOOT CONTAINER',
-          color: '#38bdf8',
-          durationMs: 800,
-        });
-        setSystemMessage(`Opened ${clickedContainer.name}.`);
-        return;
-      }
-
-      // 3. Click to trigger Workbench Crafting Table within reach
-      const clickedWorkbench = structuresRef.current.find((s) => {
-        if (s.type !== 'workbench') return false;
-        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
-        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
-        return dClick <= 45 && dPlayer <= 110;
-      });
-
-      if (clickedWorkbench) {
-        soundManager.playTerminalBlip();
-        if (options?.onOpenWorkbench) {
-          options.onOpenWorkbench();
-        }
-        triggerAnimation({
-          type: 'floating_text',
-          x: clickedWorkbench.x + clickedWorkbench.width / 2,
-          y: clickedWorkbench.y - 12,
-          angle: 0,
-          text: 'WORKBENCH CRAFTING',
-          color: '#f59e0b',
-          durationMs: 800,
-        });
-        setSystemMessage(`Accessed ${clickedWorkbench.name} Crafting Table.`);
-        return;
-      }
-
-      // 4. Click to trigger Kitchens / Cooking (Stove & Campfire) within reach
-      const clickedKitchen = structuresRef.current.find((s) => {
-        if (s.type !== 'kitchen_stove' && s.type !== 'campfire') return false;
-        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
-        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
-        return dClick <= 45 && dPlayer <= 110;
-      });
-
-      if (clickedKitchen) {
-        soundManager.playTerminalBlip();
-        if (options?.onOpenKitchen) {
-          options.onOpenKitchen();
-        }
-        triggerAnimation({
-          type: 'floating_text',
-          x: clickedKitchen.x + clickedKitchen.width / 2,
-          y: clickedKitchen.y - 12,
-          angle: 0,
-          text: 'KITCHEN RATIONS',
-          color: '#f97316',
-          durationMs: 800,
-        });
-        setSystemMessage(`${clickedKitchen.name} active for food rations & cooking.`);
-        return;
-      }
-
       // Determine active item
       const activeItem =
         curr.activeSlot === 'weapon1'
@@ -3061,112 +3396,6 @@ export function useSurvivalGame() {
           : curr.activeSlot === 'weapon2'
           ? curr.equippedWeapon2
           : curr.equippedTool;
-
-      const isHoldingHammer =
-        (activeItem?.name.toLowerCase().includes('hammer') || activeItem?.id.toLowerCase().includes('hammer')) ||
-        (curr.activeSlot === 'tool' && curr.equippedTool?.name.toLowerCase().includes('hammer'));
-
-      // 5. Demolish / Break down walls with Hammer (takes 5 clicks, recovers 50% wood and nails!)
-      const clickedWall = structuresRef.current.find((s) => {
-        if (!s.type.includes('wall')) return false;
-        const dClick = getDistToBox(targetWorldX, targetWorldY, s.x, s.y, s.width, s.height);
-        const dPlayer = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
-        return dClick <= 35 && dPlayer <= 90;
-      });
-
-      if (isHoldingHammer && clickedWall) {
-        soundManager.playHammerSound();
-        emitSound(clickedWall.x, clickedWall.y, 45, 20, 'Tearing Down Wall');
-        const nextHits = (clickedWall.dismantleHits || 0) + 1;
-
-        triggerAnimation({
-          type: 'tool_hammer',
-          x: targetWorldX,
-          y: targetWorldY,
-          angle: Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x),
-          durationMs: 300,
-        });
-
-        if (nextHits >= 5) {
-          // Wall completely broken down!
-          setStructures((prev) => prev.filter((s) => s.id !== clickedWall.id));
-
-          // 50% of wall materials (Wall costs 3 wood planks & 3 nails -> 50% recovers 2 wood planks & 2 nails!)
-          const planksYield = 2;
-          const nailsYield = 2;
-
-          setSurvivor((prev) => {
-            let inv = [...prev.inventory];
-            const pIdx = inv.findIndex((i) => i.id === 'inv_planks' || i.name.toLowerCase().includes('plank'));
-            if (pIdx !== -1) {
-              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + planksYield };
-            } else {
-              inv.push({
-                id: 'inv_planks',
-                name: 'Wood Planks',
-                category: 'resource',
-                description: 'Reclaimed pine timber planks from dismantled wall.',
-                weight: 1.5,
-                count: planksYield,
-              });
-            }
-
-            const nIdx = inv.findIndex((i) => i.id === 'inv_nails' || i.name.toLowerCase().includes('nail'));
-            if (nIdx !== -1) {
-              inv[nIdx] = { ...inv[nIdx], count: (inv[nIdx].count ?? 1) + nailsYield };
-            } else {
-              inv.push({
-                id: 'inv_nails',
-                name: 'Box of Nails',
-                category: 'resource',
-                description: 'Reclaimed construction nails from dismantled wall.',
-                weight: 0.5,
-                count: nailsYield,
-              });
-            }
-
-            return {
-              ...prev,
-              inventory: inv,
-              endurance: Math.max(0, prev.endurance - 4),
-              fatigue: Math.min(100, prev.fatigue + 2),
-            };
-          });
-
-          triggerAnimation({
-            type: 'floating_text',
-            x: clickedWall.x + clickedWall.width / 2,
-            y: clickedWall.y - 14,
-            angle: 0,
-            text: `WALL TORN DOWN! +${planksYield} PLANKS, +${nailsYield} NAILS`,
-            color: '#10b981',
-            durationMs: 1400,
-          });
-
-          setSystemMessage(
-            `Tore down ${clickedWall.name} with Hammer! Recovered ${planksYield}x Wood Planks & ${nailsYield}x Nails (50% materials).`
-          );
-        } else {
-          setStructures((prev) =>
-            prev.map((s) => (s.id === clickedWall.id ? { ...s, dismantleHits: nextHits } : s))
-          );
-
-          triggerAnimation({
-            type: 'floating_text',
-            x: targetWorldX,
-            y: targetWorldY - 14,
-            angle: 0,
-            text: `DISMANTLING WALL (${nextHits}/5)`,
-            color: '#f59e0b',
-            durationMs: 700,
-          });
-
-          setSystemMessage(
-            `Dismantling ${clickedWall.name}... (${nextHits}/5 hammer clicks). ${5 - nextHits} clicks remaining to tear down.`
-          );
-        }
-        return;
-      }
 
       const weaponType = activeItem?.weaponType || 'melee';
 
@@ -3325,14 +3554,122 @@ export function useSurvivalGame() {
         return;
       }
 
-      // 4. Default: Melee Attack with equipped weapon/tool or fists!
+      // 4. Check for Shovel Trench Digging when using Makeshift Shovel on open ground outside
+      const isShovel = activeItem?.id.includes('shovel') || activeItem?.name.toLowerCase().includes('shovel');
+      if (isShovel) {
+        // If clicking on open ground with no zombie nearby, dig a dirt trench!
+        const nearbyZombie = zombiesRef.current.find(
+          (z) => Math.hypot(z.x - targetWorldX, z.y - targetWorldY) <= 30 || Math.hypot(z.x - curr.x, z.y - curr.y) <= 50
+        );
+        if (!nearbyZombie) {
+          const distToTarget = Math.hypot(targetWorldX - curr.x, targetWorldY - curr.y);
+          if (distToTarget > 95) {
+            soundManager.playTerminalBlip();
+            setSystemMessage('Move closer to dig a trench here.');
+            return;
+          }
+
+          // Must be digging outside
+          if (isPointInsideBuilding(targetWorldX, targetWorldY, buildingsRef.current)) {
+            soundManager.playTerminalBlip();
+            setSystemMessage('⚠️ Cannot dig trenches indoors! Dig outside on open soil.');
+            return;
+          }
+
+          // Check if spot is already blocked by a solid building or tree
+          const isBlocked = structuresRef.current.some(
+            (st) =>
+              st.type !== 'dirt_trench' &&
+              targetWorldX >= st.x - 8 &&
+              targetWorldX <= st.x + st.width + 8 &&
+              targetWorldY >= st.y - 8 &&
+              targetWorldY <= st.y + st.height + 8
+          );
+          if (isBlocked) {
+            soundManager.playTerminalBlip();
+            setSystemMessage('⚠️ Cannot dig trench on existing structures.');
+            return;
+          }
+
+          const trenchX = Math.round(targetWorldX / 16) * 16 - 16;
+          const trenchY = Math.round(targetWorldY / 16) * 16 - 16;
+          const newTrench: WorldStructure = {
+            id: `trench_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            x: trenchX,
+            y: trenchY,
+            width: 32,
+            height: 32,
+            type: 'dirt_trench',
+            name: 'Dirt Trench',
+            hp: 100,
+            maxHp: 100,
+          };
+
+          setStructures((prev) => [...prev, newTrench]);
+          setSurvivor((s) => {
+            let inv = [...s.inventory];
+            const topsoilIdx = inv.findIndex(
+              (i) => i.id === 'inv_topsoil' || i.name.toLowerCase().includes('topsoil')
+            );
+            if (topsoilIdx !== -1) {
+              inv[topsoilIdx] = { ...inv[topsoilIdx], count: (inv[topsoilIdx].count ?? 1) + 1 };
+            } else {
+              inv.push({
+                id: 'inv_topsoil',
+                name: 'Topsoil',
+                category: 'resource',
+                description: 'Rich excavated topsoil gathered from digging defensive trenches.',
+                weight: 0.8,
+                count: 1,
+              });
+            }
+            return {
+              ...s,
+              inventory: inv,
+              endurance: Math.max(0, s.endurance - 5),
+              fatigue: Math.min(100, s.fatigue + 0.4),
+              activeAction: {
+                type: 'tool_chop',
+                timestamp: Date.now(),
+                durationMs: 250,
+                angle: Math.atan2(targetWorldY - s.y, targetWorldX - s.x),
+              },
+            };
+          });
+
+          soundManager.playVaultSound();
+          triggerAnimation({
+            type: 'tool_chop',
+            x: trenchX + 16,
+            y: trenchY + 16,
+            angle: 0,
+            durationMs: 300,
+          });
+          triggerAnimation({
+            type: 'floating_text',
+            x: trenchX + 16,
+            y: trenchY - 10,
+            angle: 0,
+            text: '+1 TOPSOIL · TRENCH DUG (-25% SLOW)',
+            color: '#f59e0b',
+            durationMs: 1400,
+          });
+          emitSound(trenchX, trenchY, 40, 16, 'Digging Dirt Trench');
+          setSystemMessage('Dug a dirt trench and collected 1 Topsoil! Zombies moving through this trench are slowed by 25%.');
+          return;
+        }
+      }
+
+      // 5. Default: Melee Attack with equipped weapon/tool or bare fists!
+      const isBarehanded = !activeItem || (activeItem.category !== 'weapon' && activeItem.category !== 'tool');
       const rawAimAngle = Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x);
       const panicRatio = curr.panic / 100;
       const aimJitter = (Math.random() - 0.5) * panicRatio * 0.5;
       const aimAngle = rawAimAngle + aimJitter;
-      const reach = activeItem?.reach ?? 48;
-      const damage = activeItem?.damage ?? 18;
-      const noise = activeItem?.noise ?? 15;
+      const reach = isBarehanded ? 38 : (activeItem?.reach ?? 48);
+      const damage = isBarehanded ? 5 : (activeItem?.damage ?? 18); // Punch for 5 damage!
+      const noise = isBarehanded ? 8 : (activeItem?.noise ?? 15);
+      const strikeName = isBarehanded ? 'Punch' : (activeItem?.name || 'Fists');
 
       // Panic causes missed or grazed swings (up to 40% miss chance with panic)
       const panicMissChance = panicRatio * 0.40;
@@ -3368,7 +3705,7 @@ export function useSurvivalGame() {
           color: '#f59e0b',
           durationMs: 900,
         });
-        emitSound(curr.x, curr.y, noise * 2, noise, `Missed Strike (${activeItem?.name || 'Fists'})`);
+        emitSound(curr.x, curr.y, noise * 2, noise, `Missed Strike (${strikeName})`);
         return;
       }
 
@@ -3413,6 +3750,10 @@ export function useSurvivalGame() {
                 durationMs: 900,
               });
 
+              if (isBarehanded) {
+                setSystemMessage(isCrit ? '💥 CRITICAL PUNCH! (9 damage)' : '👊 Punched shambler for 5 damage!');
+              }
+
               return {
                 ...z,
                 hp: z.hp - dealt,
@@ -3426,7 +3767,7 @@ export function useSurvivalGame() {
           .filter((z) => z.hp > 0)
       );
 
-      emitSound(curr.x, curr.y, noise * 4, noise, `Strike (${activeItem?.name || 'Fists'})`);
+      emitSound(curr.x, curr.y, noise * 4, noise, `Strike (${strikeName})`);
       if (!hitAny) soundManager.playMeleeHit(false);
     },
     [confirmPlacement, emitSound, wakeUp]
@@ -3451,7 +3792,7 @@ export function useSurvivalGame() {
       // A. Check for DOORS to open/close (within 100px of door boundary) - HIGHEST PRIORITY & 100% RELIABLE
       const nearestDoor = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
-          if (s.type !== 'door_wood') return acc;
+          if (s.type !== 'door_wood' && s.type !== 'door_stone' && s.type !== 'door_steel') return acc;
           const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
           if (d < acc.dist) return { struct: s, dist: d };
           return acc;
@@ -3564,6 +3905,10 @@ export function useSurvivalGame() {
       if (nearestChest.struct) {
         const target = nearestChest.struct;
         soundManager.playChestSound();
+        if (target.name.toLowerCase().includes('tool') && !hasTriggeredToolboxSpeechRef.current) {
+          hasTriggeredToolboxSpeechRef.current = true;
+          triggerSurvivorSpeech("That's not enough. I should find more houses like this one to get more.", 9000);
+        }
         if (onOpenChest) {
           onOpenChest(target);
         } else {
@@ -3701,6 +4046,51 @@ export function useSurvivalGame() {
         return true;
       }
 
+      // F2. Check for GROUND SCRAP WOOD to pick up [E/F]
+      const nearestScrapWood = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'ground_scrap_wood') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 75 }
+      );
+
+      if (nearestScrapWood.struct) {
+        const target = nearestScrapWood.struct;
+        soundManager.playItemPickup();
+        setStructures((prev) => prev.filter((s) => s.id !== target.id));
+        setSurvivor((s) => {
+          const inv = [...s.inventory];
+          const existingWood = inv.find((i) => i.name === 'Scrap Wood' || i.id === 'inv_scrap_wood');
+          if (existingWood) {
+            existingWood.count = (existingWood.count ?? 1) + 1;
+          } else {
+            inv.push({
+              id: `scrap_wood_${Date.now()}`,
+              name: 'Scrap Wood',
+              category: 'resource',
+              description: 'Salvaged wooden boards and sturdy branches for workbench tool crafting.',
+              weight: 0.6,
+              count: 1,
+            });
+          }
+          return { ...s, inventory: inv };
+        });
+        triggerAnimation({
+          type: 'floating_text',
+          x: target.x + target.width / 2,
+          y: target.y - 14,
+          angle: 0,
+          text: '+1 SCRAP WOOD',
+          color: '#f59e0b',
+          durationMs: 1200,
+        });
+        setSystemMessage('Picked up Scrap Wood from the ground. Added to Backpack.');
+        return true;
+      }
+
       // G. Check for TREE to chop [E/F]
       const nearestTree = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
         (acc, s) => {
@@ -3714,9 +4104,31 @@ export function useSurvivalGame() {
 
       if (nearestTree.struct) {
         const target = nearestTree.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const hasIronSaw = playerOwnsTool(
+          (name, id) => name.includes('iron saw') || id.includes('iron_saw') || name.includes('steel saw') || id.includes('steel_saw')
+        );
+        const hasAnySaw =
+          hasIronSaw ||
+          playerOwnsTool((name, id) => name.includes('saw') || id.includes('saw'));
+
+        if (!hasAnySaw) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Hands cannot break down trees! Craft an Iron Saw (yields Hardwood Logs) or Scrap Saw (yields Simple Wood Planks).');
+          return true;
+        }
+
+        const isTier2Saw = hasIronSaw;
+
         const treeAngle = Math.atan2(target.y + target.height / 2 - curr.y, target.x + target.width / 2 - curr.x);
         soundManager.playHammerSound();
-        emitSound(target.x, target.y, 240, 65, 'Wood Chopping Impact');
+        emitSound(target.x, target.y, 240, 65, 'Wood Sawing Impact');
 
         triggerAnimation({
           type: 'tool_chop',
@@ -3729,7 +4141,7 @@ export function useSurvivalGame() {
         setSurvivor((s) => ({
           ...s,
           endurance: Math.max(0, s.endurance - 5),
-          fatigue: Math.min(100, s.fatigue + 0.8), // 1/10th fatigue from chopping trees
+          fatigue: Math.min(100, s.fatigue + 0.8),
           activeAction: {
             type: 'tool_chop',
             timestamp: Date.now(),
@@ -3740,48 +4152,723 @@ export function useSurvivalGame() {
 
         const newHp = target.hp - 20;
         if (newHp <= 0) {
-          triggerAnimation({
-            type: 'floating_text',
-            x: target.x + target.width / 2,
-            y: target.y - 12,
-            angle: 0,
-            text: 'TIMBER! +4 PLANKS',
-            color: '#10b981',
-            durationMs: 1200,
-          });
           setStructures((prev) => prev.filter((s) => s.id !== target.id));
-          setSurvivor((s) => {
-            const inv = [...s.inventory];
-            const plankItem = inv.find((i) => i.id === 'inv_planks');
-            if (plankItem) {
-              plankItem.count = (plankItem.count ?? 0) + 4;
-            } else {
-              inv.push({
-                id: 'inv_planks',
-                name: 'Wood Planks',
-                category: 'resource',
-                description: 'Fresh pine timber planks.',
-                weight: 3.0,
-                count: 4,
-              });
-            }
-            return { ...s, inventory: inv };
-          });
-          setSystemMessage('Pine tree felled! Harvested 4 Wood Planks.');
+          if (isTier2Saw) {
+            triggerAnimation({
+              type: 'floating_text',
+              x: target.x + target.width / 2,
+              y: target.y - 12,
+              angle: 0,
+              text: 'TIMBER! +4 HARDWOOD LOGS',
+              color: '#10b981',
+              durationMs: 1400,
+            });
+            setSurvivor((s) => {
+              const inv = [...s.inventory];
+              const logItem = inv.find((i) => i.id === 'inv_hardwood_logs' || i.name.toLowerCase().includes('hardwood log'));
+              if (logItem) {
+                logItem.count = (logItem.count ?? 0) + 4;
+              } else {
+                inv.push({
+                  id: 'inv_hardwood_logs',
+                  name: 'Hardwood Logs',
+                  category: 'resource',
+                  description: 'Dense, seasoned hardwood logs felled with an Iron Saw. Essential for Tier 2 construction and heavy weapons.',
+                  weight: 2.0,
+                  count: 4,
+                });
+              }
+              return { ...s, inventory: inv };
+            });
+            setSystemMessage('Hardwood tree felled with Iron Saw! Harvested 4 Hardwood Logs.');
+          } else {
+            triggerAnimation({
+              type: 'floating_text',
+              x: target.x + target.width / 2,
+              y: target.y - 12,
+              angle: 0,
+              text: 'TIMBER! +4 SIMPLE WOOD PLANKS',
+              color: '#10b981',
+              durationMs: 1400,
+            });
+            setSurvivor((s) => {
+              const inv = [...s.inventory];
+              const plankItem = inv.find((i) => i.id === 'inv_planks' || i.name.toLowerCase().includes('plank'));
+              if (plankItem) {
+                plankItem.count = (plankItem.count ?? 0) + 4;
+                plankItem.name = 'Simple Wood Planks';
+              } else {
+                inv.push({
+                  id: 'inv_planks',
+                  name: 'Simple Wood Planks',
+                  category: 'resource',
+                  description: 'Fresh milled timber planks.',
+                  weight: 1.5,
+                  count: 4,
+                });
+              }
+              return { ...s, inventory: inv };
+            });
+            setSystemMessage('Pine tree felled with Scrap Saw! Harvested 4 Simple Wood Planks.');
+          }
         } else {
           triggerAnimation({
             type: 'floating_text',
             x: target.x + target.width / 2,
             y: target.y - 12,
             angle: 0,
-            text: `CHOP! (${newHp}/${target.maxHp})`,
+            text: `SAWING TREE (${newHp}/${target.maxHp})`,
             color: '#f59e0b',
             durationMs: 800,
           });
           setStructures((prev) =>
             prev.map((s) => (s.id === target.id ? { ...s, hp: newHp } : s))
           );
-          setSystemMessage(`Chopping timber... (${newHp}/${target.maxHp} HP)`);
+          setSystemMessage(`Sawing timber with ${isTier2Saw ? 'Iron Saw' : 'Scrap Saw'}... (${newHp}/${target.maxHp} HP)`);
+        }
+        return true;
+      }
+
+      // G2. Check for ABANDONED CAR to pry for Iron Pipes [E/F]
+      const nearestCar = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'abandoned_car') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 80 }
+      );
+
+      if (nearestCar.struct) {
+        const target = nearestCar.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingTemperedCrowbar = playerOwnsTool(
+          (name, id) => name.includes('crowbar') || id.includes('crowbar') || name.includes('titanium') || id.includes('titanium')
+        );
+
+        if (!isHoldingTemperedCrowbar) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Prying vehicle frames requires a Tempered Crowbar (Tier 2)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(target.x, target.y, 180, 55, 'Prying Vehicle Frame');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id === 'inv_iron_pipe' || i.name.toLowerCase().includes('iron pipe'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + 2 };
+            } else {
+              inv.push({
+                id: 'inv_iron_pipe',
+                name: 'Iron Pipes',
+                category: 'resource',
+                description: 'Heavy salvage iron pipes pried from vehicle chassis and dense structures. Essential for Tier 2 weapons, traps, and tools.',
+                weight: 1.6,
+                count: 2,
+              });
+            }
+            const mIdx = inv.findIndex((i) => i.name.toLowerCase().includes('scrap steel') || i.name.toLowerCase().includes('scrap metal'));
+            if (mIdx !== -1) {
+              inv[mIdx] = { ...inv[mIdx], count: (inv[mIdx].count ?? 1) + 1 };
+            } else {
+              inv.push({
+                id: 'inv_scrap_metal',
+                name: 'Scrap Steel',
+                category: 'resource',
+                description: 'Scrap steel plating salvaged from vehicle chassis.',
+                weight: 1.0,
+                count: 1,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 6) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'VEHICLE SALVAGED! +2 IRON PIPES, +1 SCRAP STEEL',
+            color: '#38bdf8',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Pried apart ${target.name} with Tempered Crowbar! Harvested 2x Iron Pipes and 1x Scrap Steel.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `PRYING VEHICLE (${nextHits}/3)`,
+            color: '#f59e0b',
+            durationMs: 800,
+          });
+          setSystemMessage(`Prying apart ${target.name} with Tempered Crowbar... (${nextHits}/3 clicks).`);
+        }
+        return true;
+      }
+
+      // G3. Check for RIVERBED CLAY to excavate for Dense Clay [E/F]
+      const nearestClay = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'riverbed_clay') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 75 }
+      );
+
+      if (nearestClay.struct) {
+        const target = nearestClay.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingSteelSpade = playerOwnsTool(
+          (name, id) => name.includes('spade') || id.includes('spade') || name.includes('shovel') || id.includes('shovel') || name.includes('excavator') || id.includes('excavator')
+        );
+
+        if (!isHoldingSteelSpade) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Excavating dense riverbed clay requires a Steel Spade (Tier 2)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playVaultSound();
+        emitSound(target.x, target.y, 80, 20, 'Excavating Dense Clay');
+
+        triggerAnimation({
+          type: 'tool_chop',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 280,
+        });
+
+        const newHp = target.hp - 40;
+        if (newHp <= 0) {
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: '+2 DENSE CLAY!',
+            color: '#f97316',
+            durationMs: 1400,
+          });
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, hp: s.maxHp } : s))
+          );
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const cIdx = inv.findIndex((i) => i.id === 'inv_dense_clay' || i.name.toLowerCase().includes('dense clay'));
+            if (cIdx !== -1) {
+              inv[cIdx] = { ...inv[cIdx], count: (inv[cIdx].count ?? 1) + 2 };
+            } else {
+              inv.push({
+                id: 'inv_dense_clay',
+                name: 'Dense Clay',
+                category: 'resource',
+                description: 'Viscous, heavy riverbed clay. Used for crafting Clay Pit traps and mortar for Stone Walls.',
+                weight: 1.2,
+                count: 2,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 6) };
+          });
+          setSystemMessage(`Excavated ${target.name} with Steel Spade! Harvested 2x Dense Clay.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, hp: newHp } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `DIGGING CLAY (${newHp}/${target.maxHp})`,
+            color: '#f97316',
+            durationMs: 700,
+          });
+          setSystemMessage(`Excavating clay deposit with Steel Spade... (${newHp}/${target.maxHp} HP)`);
+        }
+        return true;
+      }
+
+      // G4. Check for BRICK WALL to demolish for Stone Blocks [E/F]
+      const nearestBrick = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'wall_brick') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 75 }
+      );
+
+      if (nearestBrick.struct) {
+        const target = nearestBrick.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingClawHammer = playerOwnsTool(
+          (name, id) => name.includes('claw hammer') || id.includes('claw_hammer') || name.includes('sledgehammer') || id.includes('sledgehammer')
+        );
+
+        if (!isHoldingClawHammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Demolishing brick walls requires a Claw Hammer (Tier 2) or Sledgehammer! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(target.x, target.y, 160, 45, 'Demolishing Brick Wall');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_hammer',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 300,
+        });
+
+        if (nextHits >= 4) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const bIdx = inv.findIndex((i) => i.id === 'inv_stone_blocks' || i.name.toLowerCase().includes('stone block'));
+            if (bIdx !== -1) {
+              inv[bIdx] = { ...inv[bIdx], count: (inv[bIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_stone_blocks',
+                name: 'Stone Blocks',
+                category: 'resource',
+                description: 'Solid masonry stone blocks reclaimed from demolished building walls. Used for Stone Walls and Stone Doors.',
+                weight: 2.5,
+                count: 3,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 8) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'WALL DEMOLISHED! +3 STONE BLOCKS',
+            color: '#cbd5e1',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Demolished ${target.name} with Claw Hammer! Salvaged 3x Stone Blocks.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `DEMOLISHING BRICK (${nextHits}/4)`,
+            color: '#f59e0b',
+            durationMs: 700,
+          });
+          setSystemMessage(`Demolishing ${target.name}... (${nextHits}/4 hits).`);
+        }
+        return true;
+      }
+
+      // G5. Check for UTILITY POLE to harvest for Treated Planks [E/F]
+      const nearestPole = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'utility_pole') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 80 }
+      );
+
+      if (nearestPole.struct) {
+        const target = nearestPole.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingMotorizedSaw = playerOwnsTool(
+          (name, id) => name.includes('motorized saw') || id.includes('motorized_saw') || name.includes('chainsaw') || id.includes('chainsaw')
+        );
+
+        if (!isHoldingMotorizedSaw) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Harvesting utility poles requires a Motorized Saw (Tier 3)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(target.x, target.y, 250, 70, 'Motorized Saw Whine');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id === 'inv_treated_planks' || i.name.toLowerCase().includes('treated plank'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_treated_planks',
+                name: 'Treated Planks',
+                category: 'resource',
+                description: 'Creosote-treated weather-resistant timber harvested from industrial utility poles. Used in heavy Tier 3 base structures.',
+                weight: 2.0,
+                count: 3,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 6) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'POLE FELLED! +3 TREATED PLANKS',
+            color: '#a855f7',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Felled ${target.name} with Motorized Saw! Harvested 3x Treated Planks.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `SAWING POLE (${nextHits}/3)`,
+            color: '#a855f7',
+            durationMs: 700,
+          });
+          setSystemMessage(`Sawing ${target.name} with Motorized Saw... (${nextHits}/3 hits).`);
+        }
+        return true;
+      }
+
+      // G6. Check for HOME FOUNDATION to demolish for Concrete Mix [E/F]
+      const nearestFoundation = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'home_foundation') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 80 }
+      );
+
+      if (nearestFoundation.struct) {
+        const target = nearestFoundation.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingSledgehammer = playerOwnsTool(
+          (name, id) => name.includes('sledgehammer') || id.includes('sledgehammer') || name.includes('demolition') || id.includes('demolition')
+        );
+
+        if (!isHoldingSledgehammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Breaking home foundations requires a Sledgehammer (Tier 3)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(target.x, target.y, 200, 60, 'Sledgehammer Foundation Impact');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_hammer',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 300,
+        });
+
+        if (nextHits >= 4) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const cIdx = inv.findIndex((i) => i.id === 'inv_concrete_mix' || i.name.toLowerCase().includes('concrete mix'));
+            if (cIdx !== -1) {
+              inv[cIdx] = { ...inv[cIdx], count: (inv[cIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_concrete_mix',
+                name: 'Concrete Mix',
+                category: 'resource',
+                description: 'Crushed and pulverized industrial concrete rubble. Used for casting Poured Concrete Fortifications.',
+                weight: 2.8,
+                count: 3,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 8) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'FOUNDATION DEMOLISHED! +3 CONCRETE MIX',
+            color: '#94a3b8',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Demolished ${target.name} with Sledgehammer! Salvaged 3x Concrete Mix.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `BREAKING CONCRETE (${nextHits}/4)`,
+            color: '#94a3b8',
+            durationMs: 700,
+          });
+          setSystemMessage(`Smashing ${target.name} with Sledgehammer... (${nextHits}/4 hits).`);
+        }
+        return true;
+      }
+
+      // G7. Check for BANK VAULT to breach for Steel Plates [E/F]
+      const nearestVault = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'bank_vault') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 85 }
+      );
+
+      if (nearestVault.struct) {
+        const target = nearestVault.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingHeavyBreaker = playerOwnsTool(
+          (name, id) => name.includes('heavy breaker') || id.includes('heavy_breaker') || name.includes('breaker') || id.includes('breaker')
+        );
+
+        if (!isHoldingHeavyBreaker) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Breaching heavy bank vaults requires a Heavy Breaker (Tier 3)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(target.x, target.y, 220, 65, 'Hydraulic Breaker Vault Strike');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 4) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const sIdx = inv.findIndex((i) => i.id === 'inv_steel_plates' || i.name.toLowerCase().includes('steel plate'));
+            if (sIdx !== -1) {
+              inv[sIdx] = { ...inv[sIdx], count: (inv[sIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_steel_plates',
+                name: 'Steel Plates',
+                category: 'resource',
+                description: 'Hardened high-tensile structural steel plates breached from bank vaults and heavy industrial installations.',
+                weight: 3.2,
+                count: 3,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 9) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'VAULT BREACHED! +3 STEEL PLATES',
+            color: '#38bdf8',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Breached ${target.name} with Heavy Breaker! Salvaged 3x Steel Plates.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `BREACHING VAULT (${nextHits}/4)`,
+            color: '#38bdf8',
+            durationMs: 700,
+          });
+          setSystemMessage(`Breaching ${target.name} with Heavy Breaker... (${nextHits}/4 hits).`);
+        }
+        return true;
+      }
+
+      // G8. Check for BOULDER ROCK to trench for Gravel [E/F]
+      const nearestRock = currStructures.reduce<{ struct: WorldStructure | null; dist: number }>(
+        (acc, s) => {
+          if (s.type !== 'boulder_rock') return acc;
+          const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
+          if (d < acc.dist) return { struct: s, dist: d };
+          return acc;
+        },
+        { struct: null, dist: 80 }
+      );
+
+      if (nearestRock.struct) {
+        const target = nearestRock.struct;
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingPowerTrencher = playerOwnsTool(
+          (name, id) => name.includes('power trencher') || id.includes('power_trencher') || name.includes('trencher') || id.includes('trencher')
+        );
+
+        if (!isHoldingPowerTrencher) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Excavating bedrock rocks requires a Power Trencher (Tier 3)! Craft one at the Workbench.');
+          return true;
+        }
+
+        soundManager.playVaultSound();
+        emitSound(target.x, target.y, 210, 60, 'Power Trencher Excavation');
+        const nextHits = (target.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_chop',
+          x: target.x + target.width / 2,
+          y: target.y + target.height / 2,
+          angle: 0,
+          durationMs: 280,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== target.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const gIdx = inv.findIndex((i) => i.id === 'inv_gravel' || i.name.toLowerCase().includes('gravel'));
+            if (gIdx !== -1) {
+              inv[gIdx] = { ...inv[gIdx], count: (inv[gIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_gravel',
+                name: 'Gravel',
+                category: 'resource',
+                description: 'Coarse crushed stone aggregate milled from rocks with a Power Trencher. Key aggregate for Poured Concrete.',
+                weight: 2.2,
+                count: 3,
+              });
+            }
+            return { ...prev, inventory: inv, endurance: Math.max(0, prev.endurance - 7) };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 14,
+            angle: 0,
+            text: 'ROCK CRUSHED! +3 GRAVEL',
+            color: '#e2e8f0',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Crushed ${target.name} with Power Trencher! Harvested 3x Gravel.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === target.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: target.x + target.width / 2,
+            y: target.y - 12,
+            angle: 0,
+            text: `TRENCHING ROCK (${nextHits}/3)`,
+            color: '#e2e8f0',
+            durationMs: 700,
+          });
+          setSystemMessage(`Trenching ${target.name} with Power Trencher... (${nextHits}/3 hits).`);
         }
         return true;
       }
@@ -3840,6 +4927,1269 @@ export function useSurvivalGame() {
     [emitSound, startSleeping, wakeUp]
   );
 
+  // Right Click Action: ALL OTHER INTERACTIONS (Looting, Workbench, Kitchen, Doors, Bed, Barrel, NPCs, Dismantle)
+  const handleSecondaryAction = useCallback(
+    (
+      targetWorldX: number,
+      targetWorldY: number,
+      options?: {
+        onOpenWorkbench?: () => void;
+        onOpenKitchen?: () => void;
+        onOpenChest?: (chest: WorldStructure) => void;
+        onOpenNpc?: (npc: NpcSurvivor) => void;
+      }
+    ) => {
+      if (isGameOverRef.current) return;
+
+      // Cancel placement if right-clicked during placement mode
+      if (placementGhostRef.current) {
+        cancelPlacement();
+        return;
+      }
+
+      const curr = survivorRef.current;
+      if (curr.isSleeping) {
+        wakeUp();
+        return;
+      }
+
+      // Helper: tests if cursor is directly hovering over a structure boundary
+      const isDirectlyOver = (s: WorldStructure, padding = 4) => {
+        return (
+          targetWorldX >= s.x - padding &&
+          targetWorldX <= s.x + s.width + padding &&
+          targetWorldY >= s.y - padding &&
+          targetWorldY <= s.y + s.height + padding
+        );
+      };
+
+      // 1. Right Click on NPC SURVIVOR (Must be hovering directly over NPC)
+      const hoveredNpc = npcs.find((n) => Math.hypot(n.x - targetWorldX, n.y - targetWorldY) <= 22);
+      if (hoveredNpc) {
+        const dPlayer = Math.hypot(hoveredNpc.x - curr.x, hoveredNpc.y - curr.y);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to speak with ${hoveredNpc.name}. Move closer.`);
+          return;
+        }
+        soundManager.playTerminalBlip();
+        if (options?.onOpenNpc) {
+          options.onOpenNpc(hoveredNpc);
+        }
+        return;
+      }
+
+      // 2. Right Click on DOORS (Must be hovering directly over door)
+      const hoveredDoor = structuresRef.current.find(
+        (s) => (s.type === 'door_wood' || s.type === 'door_stone' || s.type === 'door_steel') && isDirectlyOver(s, 6)
+      );
+      if (hoveredDoor) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredDoor.x, hoveredDoor.y, hoveredDoor.width, hoveredDoor.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to reach ${hoveredDoor.name}. Move closer.`);
+          return;
+        }
+        soundManager.playHammerSound();
+        const nextState = !hoveredDoor.isOpen;
+        setStructures((prev) =>
+          prev.map((s) => (s.id === hoveredDoor.id ? { ...s, isOpen: nextState } : s))
+        );
+        emitSound(hoveredDoor.x, hoveredDoor.y, 40, 18, nextState ? 'Door Opened' : 'Door Bolted Closed');
+        triggerAnimation({
+          type: 'floating_text',
+          x: hoveredDoor.x + hoveredDoor.width / 2,
+          y: hoveredDoor.y - 12,
+          angle: 0,
+          text: nextState ? 'DOOR OPENED' : 'DOOR CLOSED',
+          color: '#38bdf8',
+          durationMs: 800,
+        });
+        setSystemMessage(nextState ? `Opened ${hoveredDoor.name}.` : `Closed ${hoveredDoor.name}.`);
+        return;
+      }
+
+      // 3. Right Click on LOOT CONTAINERS & STORAGE CHESTS (Must be hovering directly over container)
+      const hoveredChest = structuresRef.current.find((s) => s.type === 'loot_container' && isDirectlyOver(s, 5));
+      if (hoveredChest) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredChest.x, hoveredChest.y, hoveredChest.width, hoveredChest.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to access ${hoveredChest.name}. Move closer.`);
+          return;
+        }
+
+        const activeItem =
+          curr.activeSlot === 'weapon1'
+            ? curr.equippedWeapon
+            : curr.activeSlot === 'weapon2'
+            ? curr.equippedWeapon2
+            : curr.equippedTool;
+
+        const isHoldingCrowbar =
+          (activeItem?.name.toLowerCase().includes('crowbar') || activeItem?.id.toLowerCase().includes('crowbar')) ||
+          (curr.activeSlot === 'tool' && curr.equippedTool?.name.toLowerCase().includes('crowbar'));
+
+        // If holding Bent Crowbar: break down the grey lootable box into metal strips!
+        if (isHoldingCrowbar) {
+          soundManager.playHammerSound();
+          emitSound(hoveredChest.x, hoveredChest.y, 45, 22, 'Prying Apart Supply Box');
+          const nextHits = (hoveredChest.dismantleHits || 0) + 1;
+
+          triggerAnimation({
+            type: 'spark',
+            x: targetWorldX,
+            y: targetWorldY,
+            angle: 0,
+            durationMs: 250,
+          });
+
+          if (nextHits >= 3) {
+            setStructures((prev) => prev.filter((s) => s.id !== hoveredChest.id));
+            setSurvivor((prev) => {
+              let inv = [...prev.inventory];
+              const msIdx = inv.findIndex(
+                (i) => i.id === 'inv_metal_strips' || i.name.toLowerCase().includes('metal strip')
+              );
+              if (msIdx !== -1) {
+                inv[msIdx] = { ...inv[msIdx], count: (inv[msIdx].count ?? 1) + 2 };
+              } else {
+                inv.push({
+                  id: 'inv_metal_strips',
+                  name: 'Metal Strips',
+                  category: 'resource',
+                  description: 'Salvaged metal strips pried from supply crates and hardware fixtures.',
+                  weight: 0.3,
+                  count: 2,
+                });
+              }
+
+              // Transfer any contained loot safely to player's backpack
+              if (hoveredChest.containedLoot && hoveredChest.containedLoot.length > 0) {
+                hoveredChest.containedLoot.forEach((lootItem) => {
+                  const existingIdx = inv.findIndex((i) => i.name === lootItem.name);
+                  if (existingIdx !== -1) {
+                    inv[existingIdx] = {
+                      ...inv[existingIdx],
+                      count: (inv[existingIdx].count ?? 1) + (lootItem.count ?? 1),
+                    };
+                  } else {
+                    inv.push({ ...lootItem });
+                  }
+                });
+              }
+
+              return {
+                ...prev,
+                inventory: inv,
+                endurance: Math.max(0, prev.endurance - 5),
+              };
+            });
+
+            soundManager.playChestSound();
+            triggerAnimation({
+              type: 'floating_text',
+              x: hoveredChest.x + hoveredChest.width / 2,
+              y: hoveredChest.y - 14,
+              angle: 0,
+              text: 'BOX BROKEN DOWN! +2 METAL STRIPS',
+              color: '#38bdf8',
+              durationMs: 1400,
+            });
+            setSystemMessage(
+              `Pried apart ${hoveredChest.name} with Bent Crowbar! Harvested 2x Metal Strips and recovered all supplies.`
+            );
+            return;
+          } else {
+            setStructures((prev) =>
+              prev.map((s) => (s.id === hoveredChest.id ? { ...s, dismantleHits: nextHits } : s))
+            );
+            triggerAnimation({
+              type: 'floating_text',
+              x: targetWorldX,
+              y: targetWorldY - 14,
+              angle: 0,
+              text: `PRYING BOX (${nextHits}/3)`,
+              color: '#38bdf8',
+              durationMs: 700,
+            });
+            setSystemMessage(
+              `Prying apart ${hoveredChest.name} with Bent Crowbar... (${nextHits}/3 prying clicks).`
+            );
+            return;
+          }
+        }
+
+        // Default: Open or search container
+        soundManager.playChestSound();
+        if (options?.onOpenChest) {
+          options.onOpenChest(hoveredChest);
+        } else {
+          setActiveChest(hoveredChest);
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: hoveredChest.x + hoveredChest.width / 2,
+          y: hoveredChest.y - 12,
+          angle: 0,
+          text: 'LOOT CONTAINER',
+          color: '#38bdf8',
+          durationMs: 800,
+        });
+        setSystemMessage(`Opened ${hoveredChest.name}.`);
+        return;
+      }
+
+      // 4. Right Click on WORKBENCH (Must be hovering directly over workbench)
+      const hoveredWorkbench = structuresRef.current.find((s) => s.type === 'workbench' && isDirectlyOver(s, 5));
+      if (hoveredWorkbench) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredWorkbench.x, hoveredWorkbench.y, hoveredWorkbench.width, hoveredWorkbench.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to access ${hoveredWorkbench.name}. Move closer.`);
+          return;
+        }
+        soundManager.playTerminalBlip();
+        if (options?.onOpenWorkbench) {
+          options.onOpenWorkbench();
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: hoveredWorkbench.x + hoveredWorkbench.width / 2,
+          y: hoveredWorkbench.y - 12,
+          angle: 0,
+          text: 'WORKBENCH CRAFTING',
+          color: '#f59e0b',
+          durationMs: 800,
+        });
+        setSystemMessage(`Accessed ${hoveredWorkbench.name} Crafting Table.`);
+        return;
+      }
+
+      // 5. Right Click on KITCHEN STOVE / CAMPFIRE (Must be hovering directly over stove/campfire)
+      const hoveredKitchen = structuresRef.current.find(
+        (s) => (s.type === 'kitchen_stove' || s.type === 'campfire') && isDirectlyOver(s, 5)
+      );
+      if (hoveredKitchen) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredKitchen.x, hoveredKitchen.y, hoveredKitchen.width, hoveredKitchen.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to access ${hoveredKitchen.name}. Move closer.`);
+          return;
+        }
+        soundManager.playTerminalBlip();
+        if (options?.onOpenKitchen) {
+          options.onOpenKitchen();
+        }
+        triggerAnimation({
+          type: 'floating_text',
+          x: hoveredKitchen.x + hoveredKitchen.width / 2,
+          y: hoveredKitchen.y - 12,
+          angle: 0,
+          text: 'KITCHEN RATIONS',
+          color: '#f97316',
+          durationMs: 800,
+        });
+        setSystemMessage(`${hoveredKitchen.name} ready for food rations & cooking.`);
+        return;
+      }
+
+      // 6. Right Click on BED / SLEEPING MAT (Must be hovering directly over bed)
+      const hoveredBed = structuresRef.current.find(
+        (s) => (s.type === 'bed' || s.type === 'sleeping_mat') && isDirectlyOver(s, 5)
+      );
+      if (hoveredBed) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredBed.x, hoveredBed.y, hoveredBed.width, hoveredBed.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to sleep in ${hoveredBed.name}. Move closer.`);
+          return;
+        }
+        startSleeping(hoveredBed);
+        return;
+      }
+
+      // 7. Right Click on RAIN COLLECTOR BARREL / WATER WELL (Must be hovering directly over water barrel)
+      const hoveredWater = structuresRef.current.find(
+        (s) => s.type === 'rain_collector' && isDirectlyOver(s, 5)
+      );
+      if (hoveredWater) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredWater.x, hoveredWater.y, hoveredWater.width, hoveredWater.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to reach ${hoveredWater.name}. Move closer.`);
+          return;
+        }
+        const water = hoveredWater.waterStored || 0;
+        if (water <= 0) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`⚠️ ${hoveredWater.name} is empty (0/50 refills). Wait for rainfall to collect water.`);
+          return;
+        }
+
+        const canteen = curr.inventory.find((i) => i.isRefillable);
+        const currentSips = canteen?.currentSips ?? 0;
+        const maxSips = canteen?.maxSips ?? 10;
+
+        if (canteen && currentSips < maxSips) {
+          soundManager.playWaterSplash();
+          const newWater = water - 1;
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredWater.id ? { ...s, waterStored: newWater } : s))
+          );
+          setSurvivor((s) => {
+            const inv = s.inventory.map((i) => {
+              if (i.id === canteen.id) {
+                return {
+                  ...i,
+                  currentSips: maxSips,
+                  name: `Refillable Military Canteen (${maxSips}/${maxSips})`,
+                };
+              }
+              return i;
+            });
+            return { ...s, inventory: inv };
+          });
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredWater.x + hoveredWater.width / 2,
+            y: hoveredWater.y - 14,
+            angle: 0,
+            text: `REFILLED CANTEEN (${newWater}/50 LEFT)`,
+            color: '#38bdf8',
+            durationMs: 1300,
+          });
+          setSystemMessage(`Refilled canteen to full! (${newWater}/50 refills remaining in barrel).`);
+          return;
+        }
+
+        if (curr.thirst < 85) {
+          soundManager.playWaterSplash();
+          const newWater = water - 1;
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredWater.id ? { ...s, waterStored: newWater } : s))
+          );
+          setSurvivor((s) => ({ ...s, thirst: Math.min(100, s.thirst + 45) }));
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredWater.x + hoveredWater.width / 2,
+            y: hoveredWater.y - 14,
+            angle: 0,
+            text: `+45% WATER (${newWater}/50 LEFT)`,
+            color: '#06b6d4',
+            durationMs: 1300,
+          });
+          setSystemMessage(`Drank directly from rain barrel! (+45% Hydration, ${newWater}/50 refills left).`);
+          return;
+        }
+
+        setSystemMessage(`Rain Collector Barrel has ${water}/50 bottle refills. Canteen & hydration already full.`);
+        return;
+      }
+
+      // 8. Right Click on FRUIT BUSH (Must be hovering directly over bush)
+      const hoveredBush = structuresRef.current.find(
+        (s) => s.type === 'fruit_bush' && (s.fruitCount ?? 0) > 0 && isDirectlyOver(s, 5)
+      );
+      if (hoveredBush) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredBush.x, hoveredBush.y, hoveredBush.width, hoveredBush.height);
+        if (dPlayer > 85) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to harvest ${hoveredBush.name}. Move closer.`);
+          return;
+        }
+        const count = hoveredBush.fruitCount || 3;
+        const fruitName = hoveredBush.fruitType || 'Wild Blackberries';
+        setSurvivor((s) => ({
+          ...s,
+          inventory: [
+            ...s.inventory,
+            {
+              id: `harvest_${Date.now()}`,
+              name: fruitName,
+              category: 'food',
+              description: 'Freshly harvested wild fruit.',
+              weight: 0.3,
+              nutrition: 20,
+              hydration: 15,
+              count,
+            },
+          ],
+        }));
+        setStructures((prev) =>
+          prev.map((st) => (st.id === hoveredBush.id ? { ...st, fruitCount: 0, lastHarvestTime: Date.now() } : st))
+        );
+        soundManager.playTerminalBlip();
+        triggerAnimation({
+          type: 'floating_text',
+          x: hoveredBush.x + hoveredBush.width / 2,
+          y: hoveredBush.y - 14,
+          angle: 0,
+          text: `+${count} ${fruitName}`,
+          color: '#a855f7',
+          durationMs: 1200,
+        });
+        setSystemMessage(`Harvested ${count}x ${fruitName} from ${hoveredBush.name}! Added to Backpack.`);
+        return;
+      }
+
+      // 9. Right Click on FENCES (Wood Picket & Wire Fence)
+      const hoveredFence = structuresRef.current.find(
+        (s) => (s.type === 'fence_wood' || s.type === 'fence_wire') && isDirectlyOver(s, 6)
+      );
+
+      const activeItem =
+        curr.activeSlot === 'weapon1'
+          ? curr.equippedWeapon
+          : curr.activeSlot === 'weapon2'
+          ? curr.equippedWeapon2
+          : curr.equippedTool;
+
+      const isHoldingHammer = playerOwnsTool(
+        (name, id) => name.includes('hammer') || id.includes('hammer') || name.includes('mallet') || id.includes('mallet')
+      );
+
+      const isScrapHammer = playerOwnsTool(
+        (name, id) => name.includes('scrap hammer') || id.includes('scrap_hammer')
+      );
+
+      if (hoveredFence) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredFence.x, hoveredFence.y, hoveredFence.width, hoveredFence.height);
+        if (dPlayer > 90) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to reach ${hoveredFence.name}. Move closer.`);
+          return;
+        }
+
+        if (!isHoldingHammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`⚠️ Hands cannot break down fences! Equip a Scrap Hammer.`);
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredFence.x, hoveredFence.y, 40, 20, 'Knocking Down Fence');
+        const nextHits = (hoveredFence.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_hammer',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x),
+          durationMs: 300,
+        });
+
+        // Knock down fence: 3 hits
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredFence.id));
+          // Half the wood/nails of walls: 1 Simple Wood Plank & 1 Nail
+          const planksYield = 1;
+          const nailsYield = 1;
+
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id.includes('plank') || i.name.toLowerCase().includes('plank'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + planksYield };
+            } else {
+              inv.push({
+                id: 'inv_planks',
+                name: 'Simple Wood Planks',
+                category: 'resource',
+                description: 'Reclaimed pine timber planks from knocked down fence.',
+                weight: 1.5,
+                count: planksYield,
+              });
+            }
+
+            const nIdx = inv.findIndex((i) => i.id.includes('nail') || i.name.toLowerCase().includes('nail'));
+            if (nIdx !== -1) {
+              inv[nIdx] = { ...inv[nIdx], count: (inv[nIdx].count ?? 1) + nailsYield };
+            } else {
+              inv.push({
+                id: 'inv_nails',
+                name: 'Box of Nails',
+                category: 'resource',
+                description: 'Reclaimed construction nails from knocked down fence.',
+                weight: 0.4,
+                count: nailsYield,
+              });
+            }
+
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 3),
+              fatigue: Math.min(100, prev.fatigue + 1),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredFence.x + hoveredFence.width / 2,
+            y: hoveredFence.y - 14,
+            angle: 0,
+            text: `FENCE KNOCKED DOWN! +${planksYield} SIMPLE PLANK, +${nailsYield} NAIL`,
+            color: '#10b981',
+            durationMs: 1400,
+          });
+
+          setSystemMessage(
+            `Knocked down ${hoveredFence.name} with Scrap Hammer! Recovered ${planksYield}x Simple Wood Plank & ${nailsYield}x Nail.`
+          );
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredFence.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `KNOCKING DOWN FENCE (${nextHits}/3)`,
+            color: '#f59e0b',
+            durationMs: 700,
+          });
+
+          setSystemMessage(
+            `Knocking down ${hoveredFence.name}... (${nextHits}/3 hammer clicks). ${3 - nextHits} clicks remaining to tear down.`
+          );
+        }
+        return;
+      }
+
+      // 10. Right Click on WALL (Must be hovering directly over wall)
+      const hoveredWall = structuresRef.current.find((s) => s.type.includes('wall') && isDirectlyOver(s, 6));
+
+      if (hoveredWall) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredWall.x, hoveredWall.y, hoveredWall.width, hoveredWall.height);
+        if (dPlayer > 90) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to reach ${hoveredWall.name}. Move closer.`);
+          return;
+        }
+
+        if (!isHoldingHammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`⚠️ Hands cannot break down walls! Equip an appropriate hammer.`);
+          return;
+        }
+
+        // If brick wall: requires Claw Hammer or Sledgehammer!
+        if (hoveredWall.type === 'wall_brick') {
+          const isHoldingClawHammer = playerOwnsTool(
+            (name, id) => name.includes('claw hammer') || id.includes('claw_hammer') || name.includes('sledgehammer') || id.includes('sledgehammer')
+          );
+
+          if (!isHoldingClawHammer) {
+            soundManager.playTerminalBlip();
+            setSystemMessage('⚠️ Demolishing brick walls requires a Claw Hammer (Tier 2) or Sledgehammer! Craft one at the Workbench.');
+            return;
+          }
+
+          soundManager.playHammerSound();
+          emitSound(hoveredWall.x, hoveredWall.y, 45, 20, 'Demolishing Brick Wall');
+          const nextHits = (hoveredWall.dismantleHits || 0) + 1;
+
+          triggerAnimation({
+            type: 'tool_hammer',
+            x: targetWorldX,
+            y: targetWorldY,
+            angle: Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x),
+            durationMs: 300,
+          });
+
+          if (nextHits >= 4) {
+            setStructures((prev) => prev.filter((s) => s.id !== hoveredWall.id));
+            setSurvivor((prev) => {
+              let inv = [...prev.inventory];
+              const bIdx = inv.findIndex((i) => i.id === 'inv_stone_blocks' || i.name.toLowerCase().includes('stone block'));
+              if (bIdx !== -1) {
+                inv[bIdx] = { ...inv[bIdx], count: (inv[bIdx].count ?? 1) + 3 };
+              } else {
+                inv.push({
+                  id: 'inv_stone_blocks',
+                  name: 'Stone Blocks',
+                  category: 'resource',
+                  description: 'Solid masonry stone blocks reclaimed from demolished building walls. Used for Stone Walls and Stone Doors.',
+                  weight: 2.5,
+                  count: 3,
+                });
+              }
+              return {
+                ...prev,
+                inventory: inv,
+                endurance: Math.max(0, prev.endurance - 6),
+                fatigue: Math.min(100, prev.fatigue + 1.5),
+              };
+            });
+
+            triggerAnimation({
+              type: 'floating_text',
+              x: hoveredWall.x + hoveredWall.width / 2,
+              y: hoveredWall.y - 14,
+              angle: 0,
+              text: 'BRICK WALL DEMOLISHED! +3 STONE BLOCKS',
+              color: '#cbd5e1',
+              durationMs: 1500,
+            });
+
+            setSystemMessage(
+              `Demolished ${hoveredWall.name} with Claw Hammer! Salvaged 3x Stone Blocks for Tier 2 construction.`
+            );
+          } else {
+            setStructures((prev) =>
+              prev.map((s) => (s.id === hoveredWall.id ? { ...s, dismantleHits: nextHits } : s))
+            );
+
+            triggerAnimation({
+              type: 'floating_text',
+              x: targetWorldX,
+              y: targetWorldY - 14,
+              angle: 0,
+              text: `DEMOLISHING BRICK (${nextHits}/4)`,
+              color: '#f59e0b',
+              durationMs: 700,
+            });
+
+            setSystemMessage(
+              `Demolishing ${hoveredWall.name} with Claw Hammer... (${nextHits}/4 hits). ${4 - nextHits} hits remaining.`
+            );
+          }
+          return;
+        }
+
+        // Scrap Hammer CANNOT break down timber or reinforced building walls!
+        if (isScrapHammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Scrap Hammer is too weak to break down building walls! It can only knock down fences.');
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredWall.x, hoveredWall.y, 45, 20, 'Tearing Down Wall');
+        const nextHits = (hoveredWall.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'tool_hammer',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: Math.atan2(targetWorldY - curr.y, targetWorldX - curr.x),
+          durationMs: 300,
+        });
+
+        if (nextHits >= 5) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredWall.id));
+          const planksYield = 2;
+          const nailsYield = 2;
+
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id.includes('plank') || i.name.toLowerCase().includes('plank'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + planksYield };
+            } else {
+              inv.push({
+                id: 'inv_planks',
+                name: 'Simple Wood Planks',
+                category: 'resource',
+                description: 'Reclaimed pine timber planks from dismantled wall.',
+                weight: 1.5,
+                count: planksYield,
+              });
+            }
+
+            const nIdx = inv.findIndex((i) => i.id.includes('nail') || i.name.toLowerCase().includes('nail'));
+            if (nIdx !== -1) {
+              inv[nIdx] = { ...inv[nIdx], count: (inv[nIdx].count ?? 1) + nailsYield };
+            } else {
+              inv.push({
+                id: 'inv_nails',
+                name: 'Box of Nails',
+                category: 'resource',
+                description: 'Reclaimed construction nails from dismantled wall.',
+                weight: 0.5,
+                count: nailsYield,
+              });
+            }
+
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 4),
+              fatigue: Math.min(100, prev.fatigue + 2),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredWall.x + hoveredWall.width / 2,
+            y: hoveredWall.y - 14,
+            angle: 0,
+            text: `WALL TORN DOWN! +${planksYield} SIMPLE PLANKS, +${nailsYield} NAILS`,
+            color: '#10b981',
+            durationMs: 1400,
+          });
+
+          setSystemMessage(
+            `Tore down ${hoveredWall.name} with Plain Hammer! Recovered ${planksYield}x Simple Wood Planks & ${nailsYield}x Nails.`
+          );
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredWall.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `DISMANTLING WALL (${nextHits}/5)`,
+            color: '#f59e0b',
+            durationMs: 700,
+          });
+
+          setSystemMessage(
+            `Dismantling ${hoveredWall.name}... (${nextHits}/5 hammer clicks). ${5 - nextHits} clicks remaining to tear down.`
+          );
+        }
+        return;
+      }
+
+      // 11. Right Click on ABANDONED CAR (Prying for Iron Pipes)
+      const hoveredCar = structuresRef.current.find((s) => s.type === 'abandoned_car' && isDirectlyOver(s, 6));
+      if (hoveredCar) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredCar.x, hoveredCar.y, hoveredCar.width, hoveredCar.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to pry ${hoveredCar.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingTemperedCrowbar = playerOwnsTool(
+          (name, id) => name.includes('crowbar') || id.includes('crowbar') || name.includes('titanium') || id.includes('titanium')
+        );
+
+        if (!isHoldingTemperedCrowbar) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Prying vehicle frames requires a Tempered Crowbar (Tier 2)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredCar.x, hoveredCar.y, 45, 22, 'Prying Vehicle Salvage');
+        const nextHits = (hoveredCar.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredCar.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id === 'inv_iron_pipe' || i.name.toLowerCase().includes('iron pipe'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + 2 };
+            } else {
+              inv.push({
+                id: 'inv_iron_pipe',
+                name: 'Iron Pipes',
+                category: 'resource',
+                description: 'Heavy salvage iron pipes pried from vehicle chassis and dense structures. Essential for Tier 2 weapons, traps, and tools.',
+                weight: 1.6,
+                count: 2,
+              });
+            }
+            const mIdx = inv.findIndex((i) => i.name.toLowerCase().includes('scrap steel') || i.name.toLowerCase().includes('scrap metal'));
+            if (mIdx !== -1) {
+              inv[mIdx] = { ...inv[mIdx], count: (inv[mIdx].count ?? 1) + 1 };
+            } else {
+              inv.push({
+                id: 'inv_scrap_metal',
+                name: 'Scrap Steel',
+                category: 'resource',
+                description: 'Scrap steel plating salvaged from vehicle chassis.',
+                weight: 1.0,
+                count: 1,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 6),
+              fatigue: Math.min(100, prev.fatigue + 1.2),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredCar.x + hoveredCar.width / 2,
+            y: hoveredCar.y - 14,
+            angle: 0,
+            text: 'VEHICLE SALVAGED! +2 IRON PIPES, +1 SCRAP STEEL',
+            color: '#38bdf8',
+            durationMs: 1500,
+          });
+          setSystemMessage(
+            `Pried apart ${hoveredCar.name} with Tempered Crowbar! Harvested 2x Iron Pipes and 1x Scrap Steel.`
+          );
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredCar.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `PRYING VEHICLE (${nextHits}/3)`,
+            color: '#38bdf8',
+            durationMs: 700,
+          });
+          setSystemMessage(
+            `Prying apart ${hoveredCar.name} with Tempered Crowbar... (${nextHits}/3 clicks).`
+          );
+        }
+        return;
+      }
+
+      // 12. Right Click on RIVERBED CLAY DEPOSIT (Digging for Dense Clay)
+      const hoveredClay = structuresRef.current.find((s) => s.type === 'riverbed_clay' && isDirectlyOver(s, 6));
+      if (hoveredClay) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredClay.x, hoveredClay.y, hoveredClay.width, hoveredClay.height);
+        if (dPlayer > 90) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to excavate ${hoveredClay.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingSteelSpade = playerOwnsTool(
+          (name, id) => name.includes('spade') || id.includes('spade') || name.includes('shovel') || id.includes('shovel') || name.includes('excavator') || id.includes('excavator')
+        );
+
+        if (!isHoldingSteelSpade) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Excavating dense riverbed clay requires a Steel Spade (Tier 2)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playVaultSound();
+        emitSound(hoveredClay.x, hoveredClay.y, 40, 18, 'Digging Dense Clay');
+
+        triggerAnimation({
+          type: 'tool_chop',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 280,
+        });
+
+        const newHp = hoveredClay.hp - 40;
+        if (newHp <= 0) {
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredClay.x + hoveredClay.width / 2,
+            y: hoveredClay.y - 14,
+            angle: 0,
+            text: '+2 DENSE CLAY!',
+            color: '#f97316',
+            durationMs: 1400,
+          });
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredClay.id ? { ...s, hp: s.maxHp } : s))
+          );
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const cIdx = inv.findIndex((i) => i.id === 'inv_dense_clay' || i.name.toLowerCase().includes('dense clay'));
+            if (cIdx !== -1) {
+              inv[cIdx] = { ...inv[cIdx], count: (inv[cIdx].count ?? 1) + 2 };
+            } else {
+              inv.push({
+                id: 'inv_dense_clay',
+                name: 'Dense Clay',
+                category: 'resource',
+                description: 'Viscous, heavy riverbed clay. Used for crafting Clay Pit traps and mortar for Stone Walls.',
+                weight: 1.2,
+                count: 2,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 5),
+              fatigue: Math.min(100, prev.fatigue + 1),
+            };
+          });
+          setSystemMessage(`Excavated ${hoveredClay.name} with Steel Spade! Harvested 2x Dense Clay.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredClay.id ? { ...s, hp: newHp } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `DIGGING CLAY (${newHp}/${hoveredClay.maxHp})`,
+            color: '#f97316',
+            durationMs: 700,
+          });
+          setSystemMessage(`Excavating clay deposit with Steel Spade... (${newHp}/${hoveredClay.maxHp} HP)`);
+        }
+        return;
+      }
+
+      // 13. Right Click on UTILITY POLE (Felling for Treated Planks)
+      const hoveredPole = structuresRef.current.find((s) => s.type === 'utility_pole' && isDirectlyOver(s, 6));
+      if (hoveredPole) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredPole.x, hoveredPole.y, hoveredPole.width, hoveredPole.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to saw ${hoveredPole.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingMotorizedSaw = playerOwnsTool(
+          (name, id) => name.includes('motorized saw') || id.includes('motorized_saw') || name.includes('chainsaw') || id.includes('chainsaw')
+        );
+
+        if (!isHoldingMotorizedSaw) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Harvesting utility poles requires a Motorized Saw (Tier 3)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredPole.x, hoveredPole.y, 250, 70, 'Motorized Saw Whine');
+        const nextHits = (hoveredPole.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredPole.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const pIdx = inv.findIndex((i) => i.id === 'inv_treated_planks' || i.name.toLowerCase().includes('treated plank'));
+            if (pIdx !== -1) {
+              inv[pIdx] = { ...inv[pIdx], count: (inv[pIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_treated_planks',
+                name: 'Treated Planks',
+                category: 'resource',
+                description: 'Creosote-treated weather-resistant timber harvested from industrial utility poles. Used in heavy Tier 3 base structures.',
+                weight: 2.0,
+                count: 3,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 6),
+              fatigue: Math.min(100, prev.fatigue + 1),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredPole.x + hoveredPole.width / 2,
+            y: hoveredPole.y - 14,
+            angle: 0,
+            text: 'POLE FELLED! +3 TREATED PLANKS',
+            color: '#a855f7',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Felled ${hoveredPole.name} with Motorized Saw! Harvested 3x Treated Planks.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredPole.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `SAWING POLE (${nextHits}/3)`,
+            color: '#a855f7',
+            durationMs: 700,
+          });
+          setSystemMessage(`Sawing ${hoveredPole.name} with Motorized Saw... (${nextHits}/3 clicks).`);
+        }
+        return;
+      }
+
+      // 14. Right Click on HOME FOUNDATION (Demolishing for Concrete Mix)
+      const hoveredFoundation = structuresRef.current.find((s) => s.type === 'home_foundation' && isDirectlyOver(s, 6));
+      if (hoveredFoundation) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredFoundation.x, hoveredFoundation.y, hoveredFoundation.width, hoveredFoundation.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to demolish ${hoveredFoundation.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingSledgehammer = playerOwnsTool(
+          (name, id) => name.includes('sledgehammer') || id.includes('sledgehammer') || name.includes('demolition') || id.includes('demolition')
+        );
+
+        if (!isHoldingSledgehammer) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Breaking home foundations requires a Sledgehammer (Tier 3)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredFoundation.x, hoveredFoundation.y, 200, 60, 'Sledgehammer Strike');
+        const nextHits = (hoveredFoundation.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 4) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredFoundation.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const cIdx = inv.findIndex((i) => i.id === 'inv_concrete_mix' || i.name.toLowerCase().includes('concrete mix'));
+            if (cIdx !== -1) {
+              inv[cIdx] = { ...inv[cIdx], count: (inv[cIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_concrete_mix',
+                name: 'Concrete Mix',
+                category: 'resource',
+                description: 'Crushed and pulverized industrial concrete rubble. Used for casting Poured Concrete Fortifications.',
+                weight: 2.8,
+                count: 3,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 8),
+              fatigue: Math.min(100, prev.fatigue + 1.2),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredFoundation.x + hoveredFoundation.width / 2,
+            y: hoveredFoundation.y - 14,
+            angle: 0,
+            text: 'FOUNDATION DEMOLISHED! +3 CONCRETE MIX',
+            color: '#94a3b8',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Demolished ${hoveredFoundation.name} with Sledgehammer! Salvaged 3x Concrete Mix.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredFoundation.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `BREAKING CONCRETE (${nextHits}/4)`,
+            color: '#94a3b8',
+            durationMs: 700,
+          });
+          setSystemMessage(`Smashing ${hoveredFoundation.name} with Sledgehammer... (${nextHits}/4 clicks).`);
+        }
+        return;
+      }
+
+      // 15. Right Click on BANK VAULT (Breaching for Steel Plates)
+      const hoveredVault = structuresRef.current.find((s) => s.type === 'bank_vault' && isDirectlyOver(s, 6));
+      if (hoveredVault) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredVault.x, hoveredVault.y, hoveredVault.width, hoveredVault.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to breach ${hoveredVault.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingHeavyBreaker = playerOwnsTool(
+          (name, id) => name.includes('heavy breaker') || id.includes('heavy_breaker') || name.includes('breaker') || id.includes('breaker')
+        );
+
+        if (!isHoldingHeavyBreaker) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Breaching heavy bank vaults requires a Heavy Breaker (Tier 3)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playHammerSound();
+        emitSound(hoveredVault.x, hoveredVault.y, 220, 65, 'Hydraulic Breaker Vault Strike');
+        const nextHits = (hoveredVault.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 4) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredVault.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const sIdx = inv.findIndex((i) => i.id === 'inv_steel_plates' || i.name.toLowerCase().includes('steel plate'));
+            if (sIdx !== -1) {
+              inv[sIdx] = { ...inv[sIdx], count: (inv[sIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_steel_plates',
+                name: 'Steel Plates',
+                category: 'resource',
+                description: 'Hardened high-tensile structural steel plates breached from bank vaults and heavy industrial installations.',
+                weight: 3.2,
+                count: 3,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 9),
+              fatigue: Math.min(100, prev.fatigue + 1.4),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredVault.x + hoveredVault.width / 2,
+            y: hoveredVault.y - 14,
+            angle: 0,
+            text: 'VAULT BREACHED! +3 STEEL PLATES',
+            color: '#38bdf8',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Breached ${hoveredVault.name} with Heavy Breaker! Salvaged 3x Steel Plates.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredVault.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `BREACHING VAULT (${nextHits}/4)`,
+            color: '#38bdf8',
+            durationMs: 700,
+          });
+          setSystemMessage(`Breaching ${hoveredVault.name} with Heavy Breaker... (${nextHits}/4 clicks).`);
+        }
+        return;
+      }
+
+      // 16. Right Click on BOULDER ROCK (Trenching for Gravel)
+      const hoveredRock = structuresRef.current.find((s) => s.type === 'boulder_rock' && isDirectlyOver(s, 6));
+      if (hoveredRock) {
+        const dPlayer = getDistToBox(curr.x, curr.y, hoveredRock.x, hoveredRock.y, hoveredRock.width, hoveredRock.height);
+        if (dPlayer > 95) {
+          soundManager.playTerminalBlip();
+          setSystemMessage(`Too far away to trench ${hoveredRock.name}. Move closer.`);
+          return;
+        }
+
+        const isHoldingPowerTrencher = playerOwnsTool(
+          (name, id) => name.includes('power trencher') || id.includes('power_trencher') || name.includes('trencher') || id.includes('trencher')
+        );
+
+        if (!isHoldingPowerTrencher) {
+          soundManager.playTerminalBlip();
+          setSystemMessage('⚠️ Excavating bedrock rocks requires a Power Trencher (Tier 3)! Craft one at the Workbench.');
+          return;
+        }
+
+        soundManager.playVaultSound();
+        emitSound(hoveredRock.x, hoveredRock.y, 210, 60, 'Power Trencher Excavation');
+        const nextHits = (hoveredRock.dismantleHits || 0) + 1;
+
+        triggerAnimation({
+          type: 'spark',
+          x: targetWorldX,
+          y: targetWorldY,
+          angle: 0,
+          durationMs: 250,
+        });
+
+        if (nextHits >= 3) {
+          setStructures((prev) => prev.filter((s) => s.id !== hoveredRock.id));
+          setSurvivor((prev) => {
+            let inv = [...prev.inventory];
+            const gIdx = inv.findIndex((i) => i.id === 'inv_gravel' || i.name.toLowerCase().includes('gravel'));
+            if (gIdx !== -1) {
+              inv[gIdx] = { ...inv[gIdx], count: (inv[gIdx].count ?? 1) + 3 };
+            } else {
+              inv.push({
+                id: 'inv_gravel',
+                name: 'Gravel',
+                category: 'resource',
+                description: 'Coarse crushed stone aggregate milled from rocks with a Power Trencher. Key aggregate for Poured Concrete.',
+                weight: 2.2,
+                count: 3,
+              });
+            }
+            return {
+              ...prev,
+              inventory: inv,
+              endurance: Math.max(0, prev.endurance - 7),
+              fatigue: Math.min(100, prev.fatigue + 1),
+            };
+          });
+
+          triggerAnimation({
+            type: 'floating_text',
+            x: hoveredRock.x + hoveredRock.width / 2,
+            y: hoveredRock.y - 14,
+            angle: 0,
+            text: 'ROCK CRUSHED! +3 GRAVEL',
+            color: '#e2e8f0',
+            durationMs: 1500,
+          });
+          setSystemMessage(`Crushed ${hoveredRock.name} with Power Trencher! Harvested 3x Gravel.`);
+        } else {
+          setStructures((prev) =>
+            prev.map((s) => (s.id === hoveredRock.id ? { ...s, dismantleHits: nextHits } : s))
+          );
+          triggerAnimation({
+            type: 'floating_text',
+            x: targetWorldX,
+            y: targetWorldY - 14,
+            angle: 0,
+            text: `TRENCHING ROCK (${nextHits}/3)`,
+            color: '#e2e8f0',
+            durationMs: 700,
+          });
+          setSystemMessage(`Trenching ${hoveredRock.name} with Power Trencher... (${nextHits}/3 clicks).`);
+        }
+        return;
+      }
+
+      // If clicked on open ground or nothing: DO NOTHING!
+    },
+    [cancelPlacement, emitSound, npcs, startSleeping, triggerAnimation, wakeUp]
+  );
+
   // 2. Dedicated Structure Repairs (Default Key: [R])
   // Separated out so damaged doors or walls never block normal interaction!
   const repairNearby = useCallback(() => {
@@ -3850,7 +6200,7 @@ export function useSurvivalGame() {
     const nearestDamaged = structuresRef.current.reduce<{ struct: WorldStructure | null; dist: number }>(
       (acc, s) => {
         if (s.hp >= s.maxHp) return acc;
-        if (!s.type.includes('wall') && !s.type.includes('fence') && s.type !== 'door_wood' && s.type !== 'barricade_window') return acc;
+        if (!s.type.includes('wall') && !s.type.includes('fence') && !s.type.includes('door') && s.type !== 'barricade_window') return acc;
         const d = getDistToBox(curr.x, curr.y, s.x, s.y, s.width, s.height);
         if (d < acc.dist) return { struct: s, dist: d };
         return acc;
@@ -3913,10 +6263,10 @@ export function useSurvivalGame() {
         color: '#10b981',
         durationMs: 1200,
       });
-      setSystemMessage(`Repaired ${target.name} back to 100% integrity (-${planksNeeded} Planks, -${nailsNeeded} Nails).`);
+      setSystemMessage(`Repaired ${target.name} back to 100% integrity (-${planksNeeded} Simple Wood Planks, -${nailsNeeded} Nails).`);
     } else {
       soundManager.playTerminalBlip();
-      setSystemMessage(`⚠️ Cannot repair ${target.name}: Need ${planksNeeded} Wood Planks and ${nailsNeeded} Nails.`);
+      setSystemMessage(`⚠️ Cannot repair ${target.name}: Need ${planksNeeded} Simple Wood Planks and ${nailsNeeded} Nails.`);
     }
   }, [emitSound]);
 
@@ -3961,11 +6311,100 @@ export function useSurvivalGame() {
         return false;
       }
 
+      const isIngredientMatch = (item: Item, ing: { itemId: string; name: string }) => {
+        const itemId = item.id.toLowerCase();
+        const itemName = item.name.toLowerCase();
+        const ingId = ing.itemId.toLowerCase();
+        const ingName = ing.name.toLowerCase();
+
+        // Exact ID match or name match
+        if (itemId === ingId || itemName === ingName) return true;
+
+        // Treated Planks (Specific Tier 3 resource)
+        const isIngTreated = ingId.includes('treated_planks') || ingName.includes('treated plank');
+        const isItemTreated = itemId.includes('treated_planks') || itemName.includes('treated plank');
+        if (isIngTreated || isItemTreated) {
+          return isIngTreated && isItemTreated;
+        }
+
+        // Concrete Mix (Specific Tier 3 resource)
+        const isIngConcrete = ingId.includes('concrete') || ingName.includes('concrete');
+        const isItemConcrete = itemId.includes('concrete') || itemName.includes('concrete');
+        if (isIngConcrete || isItemConcrete) {
+          return isIngConcrete && isItemConcrete;
+        }
+
+        // Steel Plates (Specific Tier 3 resource - do not conflate with scrap steel)
+        const isIngSteelPlates = ingId.includes('steel_plates') || ingName.includes('steel plate');
+        const isItemSteelPlates = itemId.includes('steel_plates') || itemName.includes('steel plate');
+        if (isIngSteelPlates || isItemSteelPlates) {
+          return isIngSteelPlates && isItemSteelPlates;
+        }
+
+        // Gravel (Specific Tier 3 resource)
+        const isIngGravel = ingId.includes('gravel') || ingName.includes('gravel');
+        const isItemGravel = itemId.includes('gravel') || itemName.includes('gravel');
+        if (isIngGravel || isItemGravel) {
+          return isIngGravel && isItemGravel;
+        }
+
+        // Hardwood Logs (Specific Tier 2 resource - do not conflate with scrap wood)
+        const isIngHardwood = ingId.includes('hardwood') || ingName.includes('hardwood');
+        const isItemHardwood = itemId.includes('hardwood') || itemName.includes('hardwood');
+        if (isIngHardwood || isItemHardwood) {
+          return isIngHardwood && isItemHardwood;
+        }
+
+        // Stone Blocks
+        const isIngStone = ingId.includes('stone') || ingName.includes('stone');
+        const isItemStone = itemId.includes('stone') || itemName.includes('stone');
+        if (isIngStone || isItemStone) {
+          return isIngStone && isItemStone;
+        }
+
+        // Dense Clay
+        const isIngClay = ingId.includes('clay') || ingName.includes('clay');
+        const isItemClay = itemId.includes('clay') || itemName.includes('clay');
+        if (isIngClay || isItemClay) {
+          return isIngClay && isItemClay;
+        }
+
+        // Iron Pipes
+        const isIngPipe = ingId.includes('pipe') || ingName.includes('pipe');
+        const isItemPipe = itemId.includes('pipe') || itemName.includes('pipe');
+        if (isIngPipe || isItemPipe) {
+          return isIngPipe && isItemPipe;
+        }
+
+        // Planks (Simple Wood Planks only)
+        const isIngPlank = ingId.includes('plank') || ingName.includes('plank');
+        const isItemPlank = itemId.includes('plank') || itemName.includes('plank');
+        if ((isIngPlank || isItemPlank) && !isIngTreated && !isItemTreated) {
+          return isIngPlank && isItemPlank;
+        }
+
+        // Interchangeable scrap steel and scrap metal
+        const isIngMetal = (ingId.includes('metal') || ingName.includes('metal') || ingId.includes('steel') || ingName.includes('steel')) && !isIngSteelPlates;
+        const isItemMetal = (itemId.includes('metal') || itemName.includes('metal') || itemId.includes('steel') || itemName.includes('steel')) && !isItemSteelPlates;
+        if (isIngMetal && isItemMetal) return true;
+
+        // Scrap wood (twigs, scrap wood branch)
+        const isIngScrapWood = ingId.includes('scrap_wood') || ingName.includes('scrap wood');
+        const isItemScrapWood = itemId.includes('scrap_wood') || itemName.includes('scrap wood') || itemName.includes('branch');
+        if (isIngScrapWood && isItemScrapWood) return true;
+
+        // Nails
+        const isIngNails = ingId.includes('nail') || ingName.includes('nail');
+        const isItemNails = itemId.includes('nail') || itemName.includes('nail');
+        if (isIngNails && isItemNails) return true;
+
+        return false;
+      };
+
       const hasAll = recipe.ingredients.every((ing) => {
-        const item = curr.inventory.find(
-          (i) => i.id === ing.itemId || i.name.toLowerCase().includes(ing.name.toLowerCase())
-        );
-        return item && (item.count ?? 1) >= ing.count;
+        const matchingItems = curr.inventory.filter((i) => isIngredientMatch(i, ing));
+        const totalCount = matchingItems.reduce((acc, i) => acc + (i.count ?? 1), 0);
+        return totalCount >= ing.count;
       });
 
       if (!hasAll) {
@@ -3975,15 +6414,18 @@ export function useSurvivalGame() {
 
       const newInventory = [...curr.inventory];
       recipe.ingredients.forEach((ing) => {
-        const idx = newInventory.findIndex(
-          (i) => i.id === ing.itemId || i.name.toLowerCase().includes(ing.name.toLowerCase())
-        );
-        if (idx !== -1) {
-          const item = newInventory[idx];
-          if ((item.count ?? 1) > ing.count) {
-            item.count = (item.count ?? 1) - ing.count;
-          } else {
-            newInventory.splice(idx, 1);
+        let needed = ing.count;
+        for (let i = newInventory.length - 1; i >= 0 && needed > 0; i--) {
+          const item = newInventory[i];
+          if (isIngredientMatch(item, ing)) {
+            const have = item.count ?? 1;
+            if (have > needed) {
+              item.count = have - needed;
+              needed = 0;
+            } else {
+              needed -= have;
+              newInventory.splice(i, 1);
+            }
           }
         }
       });
@@ -4005,6 +6447,26 @@ export function useSurvivalGame() {
         setSystemMessage(`Crafted: ${recipe.resultItem.name} (Added to Backpack)`);
       }
 
+      if (recipe.id === 'bench_upgrade_max') {
+        setStructures((prev) =>
+          prev.map((s) =>
+            s.type === 'workbench'
+              ? { ...s, workbenchTier: 3, name: 'Max Industrial Machinist Workshop', maxHp: 500, hp: 500 }
+              : s
+          )
+        );
+        triggerAnimation({
+          type: 'floating_text',
+          x: curr.x,
+          y: curr.y - 25,
+          angle: 0,
+          text: 'WORKBENCH UPGRADED TO MAX TIER 3!',
+          color: '#38bdf8',
+          durationMs: 2200,
+        });
+        setSystemMessage('⚙️ MAX WORKBENCH UPGRADE COMPLETE: Industrial Machinist Workshop unlocked! Tier 3 Base Structures, Traps & Weapons now craftable.');
+      }
+
       setSurvivor((s) => ({
         ...s,
         inventory: newInventory,
@@ -4015,7 +6477,7 @@ export function useSurvivalGame() {
       requestOverseerNarration(`Survivor crafted ${recipe.name}.`);
       return true;
     },
-    [emitSound, isNearWorkbench, requestOverseerNarration]
+    [emitSound, isNearWorkbench, requestOverseerNarration, triggerAnimation]
   );
 
   const useItem = useCallback((item: Item) => {
@@ -4408,7 +6870,7 @@ export function useSurvivalGame() {
   const resetNewGame = useCallback(() => {
     soundManager.playTerminalBlip();
     const freshSurvivor: Survivor = JSON.parse(JSON.stringify(INITIAL_SURVIVOR));
-    setSurvivor({
+    const survivorState = {
       ...freshSurvivor,
       hp: 100,
       endurance: 100,
@@ -4422,9 +6884,14 @@ export function useSurvivalGame() {
       isSleeping: false,
       isBlocking: false,
       activeAction: undefined,
-    });
+    };
+    setSurvivor(survivorState);
+    survivorRef.current = survivorState;
+
     setZombies(JSON.parse(JSON.stringify(INITIAL_ZOMBIES)));
+    zombiesRef.current = JSON.parse(JSON.stringify(INITIAL_ZOMBIES));
     setStructures(JSON.parse(JSON.stringify(INITIAL_STRUCTURES)));
+    structuresRef.current = JSON.parse(JSON.stringify(INITIAL_STRUCTURES));
     setBloodSplats([
       { x: 260, y: 390, radius: 14, intensity: 0.8 },
       { x: 630, y: 300, radius: 20, intensity: 0.6 },
@@ -4432,23 +6899,56 @@ export function useSurvivalGame() {
     setNoiseHeatmap(Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(0)));
     const resetSec = 360;
     const resetInfo = getDayNightInfo(resetSec);
-    setEnvironment({
-      day: 5,
+    const freshEnv: EnvironmentState = {
+      day: 1, // Restart on Day 1!
       timeMinutes: Math.round(resetInfo.inGameMinutesOfDay),
       cycleSeconds: resetSec,
       isDay: resetInfo.isDay,
       cycleRemainingMinutes: resetInfo.remainingMinutes,
-      weather: 'Fog',
-      temperatureC: 13,
+      weather: 'Clear Cold',
+      temperatureC: 17,
       gridPower: true,
       waterGrid: true,
-      windSpeedKmh: 14,
-      fogDensity: 0.65,
-    });
+      windSpeedKmh: 9,
+      fogDensity: 0.08,
+    };
+    setEnvironment(freshEnv);
+    environmentRef.current = freshEnv;
+
+    // Reset zombie evolution multipliers to 1.0 baseline
+    zombieMultiplierRef.current = {
+      speedMult: 1.0,
+      healthMult: 1.0,
+      damageMult: 1.0,
+      spawnRateMult: 1.0,
+      sightMult: 1.0,
+      hearingMult: 1.0,
+      smellMult: 1.0,
+      populationMult: 1.0,
+    };
+
+    // Reset Home Base to starting safehouse
+    const initBase: HomeBase = {
+      x: 400,
+      y: 400,
+      sectorX: 0,
+      sectorY: 0,
+      name: 'Safehouse Base [Sector 0, 0]',
+    };
+    setHomeBase(initBase);
+    homeBaseRef.current = initBase;
+    try {
+      localStorage.setItem(HOME_BASE_STORAGE_KEY, JSON.stringify(initBase));
+    } catch {}
+
     setAnimationEffects([]);
     setPlacementGhost(null);
     setIsGameOver(false);
+    isGameOverRef.current = false;
     setDeathCause(null);
+    setActiveChest(null);
+    hasTriggeredToolboxSpeechRef.current = false;
+    setSpeechBubble(null);
 
     // Reset Chunks & NPCs
     const baseChunk: WorldChunk = {
@@ -4471,17 +6971,173 @@ export function useSurvivalGame() {
     setBuildings([
       { id: 'safehouse_bldg', name: 'Safehouse Residence', x: 340, y: 220, width: 280, height: 260 },
     ]);
+    buildingsRef.current = [
+      { id: 'safehouse_bldg', name: 'Safehouse Residence', x: 340, y: 220, width: 280, height: 260 },
+    ];
     updateProceduralChunks(INITIAL_SURVIVOR.x, INITIAL_SURVIVOR.y);
 
-    setSystemMessage('Simulation deployed. Survive in Charval County.');
+    setSystemMessage('Simulation deployed on Day 1. Welcome to Charval County.');
   }, [updateProceduralChunks]);
+
+  // 3-Slot Save Game System directly in browser storage
+  const SAVE_SLOT_PREFIX = 'charval_save_slot_';
+
+  const [saveSlots, setSaveSlots] = useState<(SaveSlotData | null)[]>(() => {
+    return [1, 2, 3].map((slotId) => {
+      try {
+        const raw = localStorage.getItem(`${SAVE_SLOT_PREFIX}${slotId}`);
+        return raw ? (JSON.parse(raw) as SaveSlotData) : null;
+      } catch {
+        return null;
+      }
+    });
+  });
+
+  const refreshSaveSlots = useCallback(() => {
+    setSaveSlots(
+      [1, 2, 3].map((slotId) => {
+        try {
+          const raw = localStorage.getItem(`${SAVE_SLOT_PREFIX}${slotId}`);
+          return raw ? (JSON.parse(raw) as SaveSlotData) : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+  }, []);
+
+  const saveGameSlot = useCallback(
+    (slotId: number): boolean => {
+      if (slotId < 1 || slotId > 3) return false;
+      const curr = survivorRef.current;
+      const env = environmentRef.current;
+      const base = homeBaseRef.current;
+      const hours = Math.floor(env.timeMinutes / 60);
+      const minutes = env.timeMinutes % 60;
+      const timeFormatted = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+
+      const slotData: SaveSlotData = {
+        slotId,
+        savedAt: Date.now(),
+        day: env.day,
+        timeFormatted,
+        timeMinutes: env.timeMinutes,
+        weather: env.weather,
+        survivorName: curr.name,
+        survivorHp: Math.round(curr.hp),
+        survivorHunger: Math.round(curr.hunger),
+        survivorThirst: Math.round(curr.thirst),
+        survivorFatigue: Math.round(curr.fatigue),
+        homeBaseName: base.name,
+        survivor: JSON.parse(JSON.stringify(curr)),
+        environment: JSON.parse(JSON.stringify(env)),
+        zombies: JSON.parse(JSON.stringify(zombiesRef.current)),
+        structures: JSON.parse(JSON.stringify(structuresRef.current)),
+        homeBase: JSON.parse(JSON.stringify(base)),
+        npcs: JSON.parse(JSON.stringify(npcs)),
+        buildings: JSON.parse(JSON.stringify(buildingsRef.current)),
+        chunks: JSON.parse(JSON.stringify(chunksRef.current)),
+        bloodSplats: JSON.parse(JSON.stringify(bloodSplats)),
+        zombieMultipliers: JSON.parse(JSON.stringify(zombieMultiplierRef.current)),
+        highScoreDays,
+      };
+
+      try {
+        localStorage.setItem(`${SAVE_SLOT_PREFIX}${slotId}`, JSON.stringify(slotData));
+        refreshSaveSlots();
+        soundManager.playTerminalBlip();
+        setSystemMessage(`💾 Game saved to Slot ${slotId} (Day ${env.day} · ${timeFormatted})!`);
+        return true;
+      } catch (err) {
+        console.error('Failed to save slot:', err);
+        setSystemMessage(`⚠️ Storage quota exceeded. Failed to save to Slot ${slotId}.`);
+        return false;
+      }
+    },
+    [bloodSplats, highScoreDays, npcs, refreshSaveSlots]
+  );
+
+  const loadGameSlot = useCallback(
+    (slotId: number): boolean => {
+      if (slotId < 1 || slotId > 3) return false;
+      try {
+        const raw = localStorage.getItem(`${SAVE_SLOT_PREFIX}${slotId}`);
+        if (!raw) return false;
+        const data = JSON.parse(raw) as SaveSlotData;
+
+        // Restore all states
+        setSurvivor(data.survivor);
+        survivorRef.current = data.survivor;
+
+        setEnvironment(data.environment);
+        environmentRef.current = data.environment;
+
+        setZombies(data.zombies);
+        zombiesRef.current = data.zombies;
+
+        setStructures(data.structures);
+        structuresRef.current = data.structures;
+
+        setHomeBase(data.homeBase);
+        homeBaseRef.current = data.homeBase;
+
+        setNpcs(data.npcs || []);
+
+        setBuildings(data.buildings || []);
+        buildingsRef.current = data.buildings || [];
+
+        setChunks(data.chunks || {});
+        chunksRef.current = data.chunks || {};
+
+        setBloodSplats(data.bloodSplats || []);
+
+        if (data.zombieMultipliers) {
+          zombieMultiplierRef.current = data.zombieMultipliers;
+        }
+
+        setIsGameOver(false);
+        isGameOverRef.current = false;
+        setDeathCause(null);
+        setPlacementGhost(null);
+        setActiveChest(null);
+
+        soundManager.playTerminalBlip();
+        soundManager.setWeatherAmbience(data.environment.weather);
+        setSystemMessage(`📁 Loaded Save Slot ${slotId}: Day ${data.day} (${data.timeFormatted}).`);
+        return true;
+      } catch (err) {
+        console.error('Failed to load slot:', err);
+        setSystemMessage(`⚠️ Corrupted or missing data in Save Slot ${slotId}.`);
+        return false;
+      }
+    },
+    []
+  );
+
+  const deleteGameSlot = useCallback(
+    (slotId: number) => {
+      try {
+        localStorage.removeItem(`${SAVE_SLOT_PREFIX}${slotId}`);
+        refreshSaveSlots();
+        soundManager.playTerminalBlip();
+        setSystemMessage(`🗑️ Deleted Save Slot ${slotId}.`);
+      } catch (err) {
+        console.error('Failed to delete save slot:', err);
+      }
+    },
+    [refreshSaveSlots]
+  );
 
   // Colony Storage Chest Management
   const openChest = useCallback((chest: WorldStructure) => {
     soundManager.playChestSound();
     setActiveChest(chest);
+    if (chest.name.toLowerCase().includes('tool') && !hasTriggeredToolboxSpeechRef.current) {
+      hasTriggeredToolboxSpeechRef.current = true;
+      triggerSurvivorSpeech("That's not enough. I should find more houses like this one to get more.", 9000);
+    }
     setSystemMessage(`Opened ${chest.name}. Deposit food and water for colony survivors.`);
-  }, []);
+  }, [triggerSurvivorSpeech]);
 
   const closeChest = useCallback(() => {
     soundManager.playChestSound();
@@ -4537,6 +7193,11 @@ export function useSurvivalGame() {
     const chest = activeChestRef.current;
     if (!chest) return;
     soundManager.playTerminalBlip();
+
+    if (chest.name.toLowerCase().includes('tool') && !hasTriggeredToolboxSpeechRef.current) {
+      hasTriggeredToolboxSpeechRef.current = true;
+      triggerSurvivorSpeech("That's not enough. I should find more houses like this one to get more.", 9000);
+    }
 
     const transferCount = Math.min(count, item.count ?? 1);
 
@@ -4602,6 +7263,7 @@ export function useSurvivalGame() {
     resetNewGame,
     moveSurvivor,
     handlePrimaryAction,
+    handleSecondaryAction,
     cycleActiveSlot,
     equipItem,
     unequipItem,
@@ -4632,6 +7294,11 @@ export function useSurvivalGame() {
     repairStructure,
     // High Score Days & Chest Storage
     highScoreDays,
+    saveSlots,
+    saveGameSlot,
+    loadGameSlot,
+    deleteGameSlot,
+    refreshSaveSlots,
     activeChest,
     openChest,
     closeChest,
@@ -4641,5 +7308,8 @@ export function useSurvivalGame() {
     homeBase,
     currentShelter,
     setAsHomeBase,
+    // Story & In-world Speech
+    speechBubble,
+    triggerSurvivorSpeech,
   };
 }

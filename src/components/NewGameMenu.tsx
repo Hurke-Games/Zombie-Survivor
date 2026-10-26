@@ -14,6 +14,8 @@ import {
   Settings,
   BookOpen,
   RotateCw,
+  Save,
+  FolderOpen,
 } from 'lucide-react';
 import { KeyBindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS } from '../utils/keybindings';
 
@@ -27,6 +29,7 @@ interface NewGameMenuProps {
   keyBindings?: KeyBindings;
   onUpdateKeyBindings?: (bindings: KeyBindings) => void;
   onStartNewGame: () => void;
+  onOpenSaves?: () => void;
   onCancel?: () => void;
   canCancel?: boolean;
 }
@@ -37,10 +40,11 @@ export const NewGameMenu: React.FC<NewGameMenuProps> = ({
   deathCause,
   day,
   timeFormatted,
-  highScoreDays = 1,
+  highScoreDays = 0,
   keyBindings = DEFAULT_KEYBINDINGS,
   onUpdateKeyBindings,
   onStartNewGame,
+  onOpenSaves,
   onCancel,
   canCancel = false,
 }) => {
@@ -319,8 +323,8 @@ export const NewGameMenu: React.FC<NewGameMenuProps> = ({
               <div className="p-3 bg-neutral-900/50 border border-neutral-800/80 rounded text-[10px] text-neutral-400 grid grid-cols-2 gap-2">
                 <div><strong>WASD:</strong> Movement (Shift = Run)</div>
                 <div><strong>Scroll / Wheel:</strong> Cycle Hand Items</div>
-                <div><strong>Left Click:</strong> Attack / Shoot / Block</div>
-                <div><strong>[-] / [+]:</strong> Zoom View (0.6x - 2.25x)</div>
+                <div className="text-red-400 font-semibold"><strong>Left Click:</strong> Attack Only (Guns/Weapons)</div>
+                <div className="text-cyan-400 font-semibold"><strong>Right Click:</strong> Loot / Doors / Craft / Tear Down</div>
                 <div><strong>[{keyBindings.interact.toUpperCase()}]:</strong> Action / Doors / Vault / Bed</div>
                 <div><strong>[{keyBindings.equipment.toUpperCase()}]:</strong> Armor Rig & Equipment</div>
                 <div><strong>[{keyBindings.repair.toUpperCase()}]:</strong> Repair Structure</div>
@@ -329,8 +333,8 @@ export const NewGameMenu: React.FC<NewGameMenuProps> = ({
             </div>
           )}
 
-          {/* Action button */}
-          <div className="pt-2">
+          {/* Action buttons */}
+          <div className="pt-2 space-y-2">
             <button
               onClick={onStartNewGame}
               className={`w-full py-3 px-4 font-bold rounded uppercase tracking-wider text-xs flex items-center justify-center gap-2 shadow-lg transition-all ${
@@ -340,8 +344,18 @@ export const NewGameMenu: React.FC<NewGameMenuProps> = ({
               }`}
             >
               {isGameOver ? <RotateCcw className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              <span>{isGameOver ? 'START NEW GAME' : 'DEPLOY SURVIVOR // START SIMULATION'}</span>
+              <span>{isGameOver ? 'START NEW GAME (DAY 1)' : 'DEPLOY SURVIVOR // START SIMULATION'}</span>
             </button>
+
+            {onOpenSaves && (
+              <button
+                onClick={onOpenSaves}
+                className="w-full py-2 px-3 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700/80 text-amber-400 hover:text-amber-300 font-semibold rounded text-xs flex items-center justify-center gap-2 transition-colors font-mono"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>SAVE / LOAD ARCHIVES (3 SLOTS)</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
