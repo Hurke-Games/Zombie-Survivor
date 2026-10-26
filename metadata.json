@@ -1,0 +1,8 @@
+{
+  "name": "Remix Zombie Survivor",
+  "description": "An omniscient tactical god-view survival simulator inspired by Project Zomboid. Track the horde, manage environment mechanics, craft shelter, and observe the survivor through a gritty 64-bit pixel art tactical terminal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
